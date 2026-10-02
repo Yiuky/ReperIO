@@ -473,7 +473,12 @@ class TestChannels(unittest.TestCase):
 
         def slow_victims(path, want_meta=True):
             try:
-                return orig_fake(path, want_meta)
+                dirs, files = orig_fake(path, want_meta)
+                # A veneno vai PRIMEIRO na fila: assim sempre há leituras chegando à
+                # conexão enquanto ela está travada (vítimas), em qualquer máquina —
+                # sem depender da ordem do sistema de arquivos nem da velocidade do CI.
+                dirs = sorted(dirs, key=lambda d: d[0] != "veneno")
+                return dirs, files
             except FakeNetError:
                 if os.path.basename(os.path.normpath(path)) != "veneno":
                     time.sleep(self.VICTIM_EXTRA)     # Windows demora a desistir
