@@ -201,7 +201,9 @@ class TestIndex(unittest.TestCase):
         self.assertIn("índice local", th[0].summary)
 
     def test_index_works_for_subfolder_and_keeps_metadata(self):
-        run_search(self.data, "*", index=self.index)
+        # Modo sequencial: lê tamanho/data em qualquer sistema (no Linux o modo
+        # rápido não lê metadados, de propósito, para poupar uma consulta por arquivo).
+        run_search(self.data, "*", index=self.index, fast=False)
         self.listed.clear()
         found, _ = run_search(os.path.join(self.data, "b"), "*.tif", index=self.index)
         self.assertEqual(self.names(found), ["b/IMAGENS_1.tif", "b/y.tif"])
