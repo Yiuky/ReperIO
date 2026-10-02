@@ -1,0 +1,57 @@
+name: Relatar um erro
+description: Algo não funcionou como esperado
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por relatar! Antes de colar logs, **troque nomes de servidores, IPs e caminhos internos** por exemplos genéricos.
+  - type: input
+    id: versao
+    attributes:
+      label: Versão
+      description: Aparece no título da janela (ex.: 2.4.0)
+    validations:
+      required: true
+  - type: dropdown
+    id: sistema
+    attributes:
+      label: Sistema operacional
+      options:
+        - Windows 10
+        - Windows 11
+        - Linux
+        - macOS
+        - Outro
+    validations:
+      required: true
+  - type: dropdown
+    id: execucao
+    attributes:
+      label: Como você executa
+      options:
+        - Executável (ReperIO.exe / ReperIO)
+        - iniciar.bat / iniciar.sh
+        - Python direto (reperio.py)
+  - type: dropdown
+    id: origem
+    attributes:
+      label: Onde fica a pasta pesquisada
+      options:
+        - Unidade de rede mapeada / DFS
+        - Caminho de rede (\\servidor\pasta)
+        - Disco local
+        - Compartilhamento montado no Linux (CIFS)
+  - type: textarea
+    id: descricao
+    attributes:
+      label: O que aconteceu
+      description: O que você fez, o que esperava e o que aconteceu.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Trecho do log
+      description: "Windows: %LOCALAPPDATA%\\reperio\\debug_execution.log · Linux: ~/.local/state/reperio/debug_execution.log"
+      render: text

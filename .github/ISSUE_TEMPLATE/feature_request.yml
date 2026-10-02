@@ -1,0 +1,19 @@
+name: Sugerir uma ideia
+description: Uma melhoria ou nova funcionalidade
+labels: ["melhoria"]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qual problema você quer resolver?
+      description: Descreva a situação do dia a dia (ex.: "toda semana preciso achar ... e demora ...").
+    validations:
+      required: true
+  - type: textarea
+    id: solucao
+    attributes:
+      label: Como imagina a solução?
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas que você já tentou

@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "Se usar o ReperIO em um trabalho, cite-o assim. / If you use ReperIO, please cite it as below."
+type: software
+title: "ReperIO: busca, índice, exportação e cópia de arquivos em servidores"
+abstract: >-
+  Portable, dependency-free desktop tool for Windows and Linux that searches local folders and network
+  file servers (SMB/CIFS, DFS, mapped drives) for files by name and extension, keeps a local SQLite index
+  for instant repeated searches, exports results to Excel, CSV or TXT and copies files in parallel. It
+  stays responsive on unreliable servers by using several independent SMB connections, switching
+  connection when one stalls and reading problematic folders in quarantine.
+authors:
+  - family-names: Gambati
+    given-names: Joberth Firmino
+version: 2.5.0
+date-released: 2026-10-02
+license: MIT
+repository-code: "https://github.com/Yiuky/ReperIO"
+url: "https://github.com/Yiuky/ReperIO"
+keywords:
+  - file search
+  - file server
+  - SMB
+  - DFS
+  - GIS
+  - index
+  - export
+  - Python
+  - tkinter

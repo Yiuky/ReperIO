@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build (tools/build.py)
+.build/
+build/
+dist/
+dist-*/
+*.spec
+
+# Logs locais antigos (o app agora grava em %LOCALAPPDATA% / ~/.local/state)
+debug_execution.log*
+
+# SO / editores
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Notas internas (servidores, IPs e pastas da organização) — nunca publicar
+notas-internas/
+CONTINUAR.md
