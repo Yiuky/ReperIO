@@ -9,17 +9,13 @@ Ideias e próximos passos, em ordem de prioridade. O que já foi entregue está 
 
 | # | Pri. | Esf. | Item | Por quê |
 |---|------|------|------|---------|
-| 1 | P1 | M | **Indexação agendada + índice compartilhado na rede**: modo sem janela (`--indexar <pasta>`) para o Agendador de Tarefas/cron e índice gravado numa pasta da rede, lido por toda a equipe | A varredura completa acontece uma vez (de madrugada) para todos; ninguém espera |
-| 2 | P2 | P | **Excluir pastas da busca** (ex.: `MOSAICOS`, `_backup`) | Evita varrer árvores enormes onde o arquivo sabidamente não está |
-| 3 | P2 | P | **Filtros por tamanho e data** (ex.: > 1 GB, modificados em 2024) | Fácil com o índice; útil para limpeza e auditoria |
-| 4 | P2 | P | **Duplo clique abre a pasta do arquivo** | Pedido comum no uso diário |
-| 5 | P2 | M | **Cópia inteligente**: pular arquivos já existentes com o mesmo tamanho; retomar cópia interrompida | Cópias grandes pela rede caem com frequência |
-| 6 | P2 | P | Tela para **gerenciar pastas problemáticas** (ver, remover, exportar para a TI) | Hoje a lista aparece ao fim de cada busca |
-| 7 | P3 | P | Lembrar as **últimas pastas raiz** usadas | Conforto |
-| 8 | P3 | P | Ícone próprio da aplicação | Identidade visual |
-| 9 | P3 | M | Executável para **macOS** nas Releases | Hoje o macOS usa o código-fonte |
-| 10 | P3 | M | Troca de conexão no **Linux** (montagens CIFS alternativas) | Hoje o Linux usa o modo de rodadas no fim |
-| 11 | P3 | — | **Assinatura digital** do executável | Elimina o aviso do SmartScreen e reduz bloqueios de antivírus |
+| 1 | P1 | M | **Cópia inteligente**: pular arquivos já existentes com o mesmo tamanho; retomar cópia interrompida | Cópias grandes pela rede caem com frequência |
+| 2 | P2 | P | **Filtro por data de modificação** (ex.: modificados em 2024, últimos 30 dias) | Complementa o filtro por tamanho e a análise de espaço entregues na v2.6.0 |
+| 3 | P2 | P | Tela para **gerenciar pastas problemáticas** (ver, remover, exportar para a TI) | Hoje a lista aparece ao fim de cada busca |
+| 4 | P3 | P | Lembrar as **últimas pastas raiz** usadas | Conforto |
+| 5 | P3 | M | Executável para **macOS** nas Releases | Hoje o macOS usa o código-fonte |
+| 6 | P3 | M | Troca de conexão no **Linux** (montagens CIFS alternativas) | Hoje o Linux usa o modo de rodadas no fim |
+| 7 | P3 | — | **Assinatura digital** do executável | Elimina o aviso do SmartScreen e reduz bloqueios de antivírus |
 
 ## Limitações conhecidas
 

@@ -32,7 +32,7 @@ import threading
 import time
 import traceback
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 APP_NAME = "ReperIO"
 APP_TAGLINE = "busca, índice, exportação e cópia de arquivos em servidores"
 APP_URL = "https://github.com/Yiuky/ReperIO"
@@ -404,6 +404,134 @@ def make_matcher(pattern, exts=(), case_sensitive=False):
         return bool(p_wild) and (fm(b, p_wild) or fm(n, p_wild))
     return match
 
+_SIZE_UNITS = {
+    "": 1, "b": 1, "byte": 1, "bytes": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
+_SIZE_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*([a-zA-Z]*)\s*$")
+
+def parse_size(raw):
+    """'100 MB' -> 104857600; '1,5 GB' -> 1610612736. None se vazio; ValueError se inválido."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    m = _SIZE_RE.match(s)
+    if not m:
+        raise ValueError("Tamanho inválido: %r (use ex.: 100 MB, 1,5 GB, 500 KB)" % raw)
+    val = float(m.group(1).replace(",", "."))
+    unit = m.group(2).lower()
+    if unit not in _SIZE_UNITS:
+        raise ValueError("Unidade de tamanho desconhecida: %r (use B, KB, MB, GB, TB)" % m.group(2))
+    return int(val * _SIZE_UNITS[unit])
+
+def parse_size_filter(raw):
+    """
+    Interpreta um filtro de tamanho e devolve (min_bytes, max_bytes):
+      - vazio                       -> (None, None)
+      - '100 MB' / '> 100 MB'       -> (104857600, None)
+      - '< 10 MB' / '<= 10 MB'      -> (None, 10485760)
+      - '10 MB .. 500 MB'           -> (10485760, 524288000)
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None, None
+    low = s.lower()
+    for sep in ("..", " a ", " até ", " ate ", "-"):
+        if sep in low and not low.lstrip().startswith("-"):
+            idx = low.find(sep)
+            left, right = s[:idx].strip(), s[idx + len(sep):].strip()
+            lo = parse_size(left) if left else None
+            hi = parse_size(right) if right else None
+            if lo is not None and hi is not None and lo > hi:
+                lo, hi = hi, lo
+            return lo, hi
+    if s.startswith((">=", "=>")):
+        return parse_size(s[2:]), None
+    if s.startswith((">", "+")):
+        return parse_size(s[1:]), None
+    if s.startswith(("<=", "=<")):
+        return None, parse_size(s[2:])
+    if s.startswith("<"):
+        return None, parse_size(s[1:])
+    return parse_size(s), None
+
+def make_size_matcher(min_size=None, max_size=None):
+    """Devolve uma função tamanho_em_bytes -> bool (ou None se sem filtro)."""
+    if min_size is None and max_size is None:
+        return None
+
+    def match_size(sz):
+        if sz is None or sz < 0:
+            return False
+        if min_size is not None and sz < min_size:
+            return False
+        if max_size is not None and sz > max_size:
+            return False
+        return True
+    return match_size
+
+def parse_excludes(raw):
+    """'MOSAICOS, _backup' ou 'node_modules .git' -> ['MOSAICOS', '_backup']"""
+    s = (raw or "").strip()
+    if not s:
+        return []
+    parts = re.split(r"[,;]+", s) if ("," in s or ";" in s) else s.split()
+    return [p.strip() for p in parts if p.strip()]
+
+def make_dir_excluder(excludes=(), root=None):
+    """
+    Devolve função dir_path -> bool (True = pasta deve ser ignorada).
+    Aceita nomes de pasta ('MOSAICOS', 'node_modules', '.git'), curingas
+    ('*backup*', 'temp*') ou subcaminhos ('AppData/Local/Temp'). Quando `root`
+    é informado, também ignora descendentes de uma pasta ignorada (para que a
+    consulta ao índice SQLite tenha o mesmo efeito da varredura ao vivo).
+    """
+    pats = []
+    for raw in (excludes or ()):
+        p = clean_pattern(raw).replace("/", os.sep).replace("\\", os.sep).strip(os.sep).lower()
+        if p:
+            pats.append((p, "*" in p or "?" in p, os.sep in p))
+    if not pats:
+        return None
+    root_norm = os.path.normpath(root) if root else None
+    root_key = path_key(root_norm) if root_norm else None
+    fm = fnmatch.fnmatchcase
+
+    def is_excluded(dir_path):
+        dp = os.path.normpath(dir_path)
+        if root_key is not None:
+            dk = path_key(dp)
+            if dk == root_key:
+                return False
+            if is_under(dk, root_key):
+                rel = dp[len(root_norm):].lstrip(os.sep).lower()
+                segs = [s for s in rel.split(os.sep) if s]
+            else:
+                rel = os.path.basename(dp).lower()
+                segs = [rel] if rel else []
+        else:
+            rel = os.path.basename(dp).lower()
+            segs = [rel] if rel else []
+        for p, is_wild, has_sep in pats:
+            if has_sep:
+                if is_wild:
+                    if (fm(rel, p) or fm(rel, p + os.sep + "*")
+                            or fm(rel, "*" + os.sep + p)
+                            or fm(rel, "*" + os.sep + p + os.sep + "*")):
+                        return True
+                elif (rel == p or rel.startswith(p + os.sep)
+                        or (os.sep + p + os.sep) in (os.sep + rel + os.sep)):
+                    return True
+            else:
+                for seg in segs:
+                    if fm(seg, p) if is_wild else (seg == p):
+                        return True
+        return False
+    return is_excluded
+
 # ===========================================================================
 # Controle de concorrência adaptativo
 # ===========================================================================
@@ -756,11 +884,12 @@ class Index(object):
         if self._t.is_alive():
             self._sync("close", timeout)
 
-    def query(self, root, matcher, emit, stop):
+    def query(self, root, matcher, emit, stop, size_matcher=None, dir_excluder=None):
         """
-        Emite os arquivos indexados sob `root` que casam com `matcher` e
-        devolve um resumo: pastas lidas, pastas pendentes [(caminho, pmtime)],
-        se a própria raiz já foi lida e a data da leitura mais antiga.
+        Emite os arquivos indexados sob `root` que casam com `matcher`
+        (e opcionalmente `size_matcher` e `dir_excluder`) e devolve um resumo:
+        pastas lidas, pastas pendentes [(caminho, pmtime)], se a própria raiz
+        já foi lida e a data da leitura mais antiga.
         """
         self.flush()
         c = self.connect()
@@ -773,22 +902,38 @@ class Index(object):
                 "WHERE %s AND d.state = 1), min(scanned) FROM dirs d WHERE %s AND state = 1"
                 % (_UNDER, _UNDER), args + args).fetchone()
             emitted = 0
+            excl_cache = {}
             if n_done:
                 cur = c.execute(
                     "SELECT d.path, f.name, f.size, f.mtime FROM files f "
                     "JOIN dirs d ON d.id = f.dir_id "
                     "WHERE %s AND d.state = 1 AND gff_match(f.name)" % _UNDER, args)
                 for dpath, name, size, mtime in cur:
-                    dpath, name = db_dec(dpath), db_dec(name)
+                    dpath = db_dec(dpath)
+                    if dir_excluder is not None:
+                        ex = excl_cache.get(dpath)
+                        if ex is None:
+                            ex = dir_excluder(dpath)
+                            excl_cache[dpath] = ex
+                        if ex:
+                            continue
+                    sz = -1 if size is None else size
+                    if size_matcher is not None and not size_matcher(sz):
+                        continue
+                    name = db_dec(name)
                     emit((os.path.join(dpath, name), name, os.path.splitext(name)[1],
-                          -1 if size is None else size, dpath, -1 if mtime is None else mtime))
+                          sz, dpath, -1 if mtime is None else mtime))
                     emitted += 1
             pending = [(db_dec(r[0]), r[1]) for r in c.execute(
                 "SELECT path, pmtime FROM dirs d WHERE %s AND state = 0" % _UNDER, args)]
+            if dir_excluder is not None:
+                pending = [(p, mt) for p, mt in pending if not dir_excluder(p)]
             root_done = c.execute("SELECT 1 FROM dirs WHERE key = ? AND state = 1",
                                   (args[0],)).fetchone() is not None
             problems = [(db_dec(r[0]),) + tuple(r[1:]) for r in c.execute(
                 "SELECT d.path, d.fails, d.last_error, d.last_try FROM problems d WHERE %s" % _UNDER, args)]
+            if dir_excluder is not None:
+                problems = [pr for pr in problems if not dir_excluder(pr[0])]
             return {"dirs": n_done, "files": n_files, "emitted": emitted, "pending": pending,
                     "root_done": root_done, "oldest": oldest, "problems": problems}
         except sqlite3.OperationalError:
@@ -797,6 +942,190 @@ class Index(object):
             raise
         finally:
             c.close()
+
+    def folder_space(self, root, exclude_dirs=(), stop=None):
+        """
+        Soma o espaço ocupado por pasta e subárvore sob `root` diretamente do
+        índice SQLite. Devolve a estrutura de `aggregate_folder_space` (ou None
+        se `stop` for acionado durante a consulta).
+        """
+        self.flush()
+        c = self.connect()
+        try:
+            if stop is not None:
+                c.set_progress_handler(lambda: 1 if stop.is_set() else 0, 50000)
+            args = tuple(db_enc(a) for a in _under_args(root))
+            excluder = make_dir_excluder(exclude_dirs, root) if exclude_dirs else None
+            cur = c.execute(
+                "SELECT d.path, count(f.rowid), "
+                "COALESCE(sum(CASE WHEN f.size > 0 THEN f.size ELSE 0 END), 0) "
+                "FROM dirs d LEFT JOIN files f ON f.dir_id = d.id "
+                "WHERE %s AND d.state = 1 GROUP BY d.id" % _UNDER, args)
+            stats = []
+            for dpath, fcnt, fbytes in cur:
+                dp = db_dec(dpath)
+                if excluder is not None and excluder(dp):
+                    continue
+                stats.append((dp, fcnt, fbytes))
+            pending = [db_dec(r[0]) for r in c.execute(
+                "SELECT path FROM dirs d WHERE %s AND state = 0" % _UNDER, args)]
+            if excluder is not None:
+                pending = [p for p in pending if not excluder(p)]
+            return aggregate_folder_space(stats, root, pending_dirs=len(pending))
+        except sqlite3.OperationalError:
+            if stop is not None and stop.is_set():
+                return None
+            raise
+        finally:
+            c.close()
+
+def aggregate_folder_space(dir_stats, root, pending_dirs=0):
+    """
+    Agrega o consumo de espaço de toda a árvore sob `root` em uma única passada.
+    `dir_stats`: iterável de (caminho_da_pasta, qtd_arquivos_diretos, bytes_diretos).
+    """
+    root = os.path.normpath(root)
+    rk = path_key(root)
+    nodes = {
+        rk: {
+            "path": root,
+            "name": os.path.basename(root) or root,
+            "total_size": 0,
+            "total_files": 0,
+            "direct_size": 0,
+            "direct_files": 0,
+            "children": set(),
+        }
+    }
+    n_scanned = 0
+    for dpath, fcount, fbytes in dir_stats:
+        dpath = os.path.normpath(dpath)
+        dk = path_key(dpath)
+        if not is_under(dk, rk):
+            continue
+        n_scanned += 1
+        fcount = max(0, int(fcount or 0))
+        fbytes = max(0, int(fbytes or 0))
+        if dk not in nodes:
+            nodes[dk] = {
+                "path": dpath,
+                "name": os.path.basename(dpath) or dpath,
+                "total_size": 0,
+                "total_files": 0,
+                "direct_size": 0,
+                "direct_files": 0,
+                "children": set(),
+            }
+        nodes[dk]["direct_size"] += fbytes
+        nodes[dk]["direct_files"] += fcount
+        cur_path, cur_key = dpath, dk
+        while True:
+            node = nodes[cur_key]
+            node["total_size"] += fbytes
+            node["total_files"] += fcount
+            if cur_key == rk:
+                break
+            parent_path = os.path.dirname(cur_path)
+            if not parent_path or parent_path == cur_path:
+                break
+            parent_key = path_key(parent_path)
+            if not is_under(parent_key, rk):
+                parent_key = rk
+                parent_path = root
+            if parent_key not in nodes:
+                nodes[parent_key] = {
+                    "path": parent_path,
+                    "name": os.path.basename(parent_path) or parent_path,
+                    "total_size": 0,
+                    "total_files": 0,
+                    "direct_size": 0,
+                    "direct_files": 0,
+                    "children": set(),
+                }
+            nodes[parent_key]["children"].add(cur_key)
+            cur_path, cur_key = nodes[parent_key]["path"], parent_key
+    root_node = nodes[rk]
+    return {
+        "root": root,
+        "root_key": rk,
+        "total_size": root_node["total_size"],
+        "total_files": root_node["total_files"],
+        "scanned_dirs": n_scanned,
+        "pending_dirs": pending_dirs,
+        "nodes": nodes,
+    }
+
+def folder_space_children(space_info, folder_path=None):
+    """
+    Lista o detalhamento de espaço das subpastas imediatas de `folder_path`
+    (padrão: raiz), ordenadas do maior `total_size` para o menor.
+    Inclui `[Arquivos na própria pasta]` se houver arquivos diretos nela.
+    """
+    nodes = space_info["nodes"]
+    rk = space_info["root_key"]
+    target_key = path_key(folder_path) if folder_path else rk
+    parent = nodes.get(target_key)
+    if parent is None:
+        return []
+    parent_total = parent["total_size"]
+    root_total = space_info["total_size"]
+    out = []
+    for ck in parent["children"]:
+        ch = nodes[ck]
+        sz = ch["total_size"]
+        pct_p = (sz * 100.0 / parent_total) if parent_total > 0 else 0.0
+        out.append({
+            "path": ch["path"],
+            "name": ch["name"],
+            "total_size": sz,
+            "total_files": ch["total_files"],
+            "direct_size": ch["direct_size"],
+            "direct_files": ch["direct_files"],
+            "subdirs": len(ch["children"]),
+            "pct": pct_p,
+            "pct_parent": pct_p,
+            "pct_root": (sz * 100.0 / root_total) if root_total > 0 else 0.0,
+            "is_direct_entry": False,
+            "is_self": False,
+        })
+    if parent["direct_files"] > 0:
+        dsz = parent["direct_size"]
+        pct_p = (dsz * 100.0 / parent_total) if parent_total > 0 else 0.0
+        out.append({
+            "path": parent["path"],
+            "name": "[Arquivos na própria pasta]",
+            "total_size": dsz,
+            "total_files": parent["direct_files"],
+            "direct_size": dsz,
+            "direct_files": parent["direct_files"],
+            "subdirs": 0,
+            "pct": pct_p,
+            "pct_parent": pct_p,
+            "pct_root": (dsz * 100.0 / root_total) if root_total > 0 else 0.0,
+            "is_direct_entry": True,
+            "is_self": True,
+        })
+    out.sort(key=lambda r: (r["total_size"], r["total_files"]), reverse=True)
+    return out
+
+def summarize_rows_space(rows, root, exclude_dirs=()):
+    """Agrega espaço por pasta a partir de resultados em memória (dicts com dir e size)."""
+    excluder = make_dir_excluder(exclude_dirs, root) if exclude_dirs else None
+    by_dir = {}
+    for r in rows:
+        dp = r.get("dir") or os.path.dirname(r["path"])
+        if excluder is not None and excluder(dp):
+            continue
+        sz = r.get("size")
+        sz = sz if isinstance(sz, (int, float)) and sz > 0 else 0
+        prev = by_dir.get(dp)
+        if prev is None:
+            by_dir[dp] = [1, sz]
+        else:
+            prev[0] += 1
+            prev[1] += sz
+    stats = [(dp, cnt, tot) for dp, (cnt, tot) in by_dir.items()]
+    return aggregate_folder_space(stats, root, pending_dirs=0)
 
 # ===========================================================================
 # Canais: várias conexões SMB independentes com o mesmo servidor
@@ -1021,20 +1350,28 @@ class SearchThread(threading.Thread):
 
     def __init__(self, root_dir, pattern, extensions, case_sensitive,
                  q, stop_ev, fast_mode=True, index=None, refresh=False, retry_problems=False,
-                 channels=None):
+                 channels=None, min_size=None, max_size=None, exclude_dirs=(), want_meta=None):
         super(SearchThread, self).__init__(daemon=True)
         self.root_dir = os.path.normpath(root_dir)
         self.pattern = clean_pattern(pattern) or "*"
         self.exts = [e.lower() for e in extensions if e]
         self.case = case_sensitive
         self.match = make_matcher(self.pattern, self.exts, case_sensitive)
+        self.min_size = min_size
+        self.max_size = max_size
+        self.size_match = make_size_matcher(min_size, max_size)
+        self.exclude_dirs = list(exclude_dirs or ())
+        self.dir_excluder = make_dir_excluder(self.exclude_dirs, self.root_dir)
         self.q = q
         self.stop = stop_ev
         self.fast_mode = fast_mode
         self.index = index
         self.verify = index is not None and refresh
         self.n_workers = SCAN_WORKERS if fast_mode else 1
-        self.want_meta = not fast_mode
+        if want_meta is None:
+            self.want_meta = (not fast_mode) or (self.index is not None) or (self.size_match is not None)
+        else:
+            self.want_meta = bool(want_meta)
         self._lock = threading.Lock()
         # Conexões (descobertas no início da busca, fora da GUI).
         self._given_channels = channels
@@ -1212,10 +1549,12 @@ class SearchThread(threading.Thread):
 
     def _admit(self, children, skip_done):
         """Filtra subpastas: nunca enfileira a mesma pasta duas vezes na mesma
-        busca e, no modo índice, pula as já lidas (vieram do índice)."""
+        busca, ignora pastas excluídas e, no modo índice, pula as já lidas."""
         db = self._db() if (skip_done and self.index is not None) else None
         out = []
         for cp, mt in children:
+            if self.dir_excluder is not None and self.dir_excluder(cp):
+                continue
             k = path_key(cp)
             if db is not None:
                 row = db.execute("SELECT state FROM dirs WHERE key = ?", (db_enc(k),)).fetchone()
@@ -1343,7 +1682,7 @@ class SearchThread(threading.Thread):
         for name, size, mtime in files:
             if self.stop.is_set():
                 break
-            if self.match(name):
+            if self.match(name) and (self.size_match is None or self.size_match(size)):
                 fp = os.path.join(path, name)
                 if shown is not None and path_key(fp) in shown:
                     continue   # já exibido a partir do índice
@@ -1644,7 +1983,8 @@ class SearchThread(threading.Thread):
             self._put(item)
 
         try:
-            info = self.index.query(self.root_dir, self.match, emit, self.stop)
+            info = self.index.query(self.root_dir, self.match, emit, self.stop,
+                                    size_matcher=self.size_match, dir_excluder=self.dir_excluder)
         except Exception as e:
             dlog("[ÍNDICE] falha na leitura, varrendo o servidor: %s" % e)
             self.index = None
@@ -2082,9 +2422,15 @@ def export_xlsx(rows, dest, sheet="Resultados"):
         s(6, path)
         out.append('<row r="%d">%s</row>' % (r, "".join(cells)))
     widths[4] = max(widths[4], 17)
-    last = _xlsx_col(len(EXPORT_HEADER) - 1)
+    _write_xlsx_package(dest, sheet, EXPORT_HEADER, out, widths)
+    return n
+
+def _write_xlsx_package(dest, sheet, header, out, widths):
+    import zipfile
+    n = len(out)
+    last = _xlsx_col(len(header) - 1)
     head = "".join('<c r="%s1" t="inlineStr" s="1"><is><t>%s</t></is></c>' % (_xlsx_col(i), _xml(h))
-                   for i, h in enumerate(EXPORT_HEADER))
+                   for i, h in enumerate(header))
     cols = "".join('<col min="%d" max="%d" width="%.1f" customWidth="1"/>' % (i + 1, i + 1, w + 2)
                    for i, w in enumerate(widths))
     sheet_xml = (
@@ -2098,17 +2444,21 @@ def export_xlsx(rows, dest, sheet="Resultados"):
     styles = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm"/></numFmts>'
+        '<numFmts count="2">'
+        '<numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm"/>'
+        '<numFmt numFmtId="165" formatCode="0.0&quot;%&quot;"/>'
+        '</numFmts>'
         '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
         '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
         '<fills count="2"><fill><patternFill patternType="none"/></fill>'
         '<fill><patternFill patternType="gray125"/></fill></fills>'
         '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
         '<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
         '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+        '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
         '</cellXfs></styleSheet>')
     files = {
         "[Content_Types].xml":
@@ -2145,7 +2495,6 @@ def export_xlsx(rows, dest, sheet="Resultados"):
     with zipfile.ZipFile(fs_path(dest), "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in files.items():
             z.writestr(name, data.encode("utf-8"))
-    return n
 
 def export_results(rows, dest):
     """Escolhe o formato pela extensão de `dest` (.xlsx, .csv, .txt)."""
@@ -2158,6 +2507,78 @@ def export_results(rows, dest):
         return export_xlsx(rows, dest)
     raise ValueError("Formato não suportado: %s (use .xlsx, .csv ou .txt)" % ext)
 
+SPACE_EXPORT_HEADER = (
+    "Pasta", "Tamanho (bytes)", "Tamanho", "% do total",
+    "Arquivos", "Na própria pasta (bytes)", "Caminho completo",
+)
+
+def _space_export_rows(rows):
+    for r in rows:
+        name = r.get("name") or os.path.basename(r.get("path", "")) or r.get("path", "")
+        ts = int(r.get("total_size", 0) or 0)
+        pct = float(r.get("pct", 0.0) or 0.0)
+        tf = int(r.get("total_files", 0) or 0)
+        ds = int(r.get("direct_size", 0) or 0)
+        path = r.get("path", "")
+        yield name, ts, pct, tf, ds, path
+
+def export_space_csv(rows, dest):
+    """CSV (UTF-8 com BOM, `;`) do resumo de espaço por pasta."""
+    import csv
+    n = 0
+    with open(fs_path(dest), "w", encoding="utf-8-sig", errors="replace", newline="") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(SPACE_EXPORT_HEADER)
+        for name, ts, pct, tf, ds, path in _space_export_rows(rows):
+            w.writerow([name, ts, fsize(ts), "%.1f%%" % pct, tf, ds, path])
+            n += 1
+    return n
+
+def export_space_txt(rows, dest):
+    """Texto UTF-8 com resumo de espaço por pasta (uma pasta por linha)."""
+    n = 0
+    with open(fs_path(dest), "w", encoding="utf-8", errors="replace", newline="\n") as f:
+        for _name, ts, pct, tf, _ds, path in _space_export_rows(rows):
+            f.write("%12s  %5.1f%%  %8d arq.  %s\n" % (fsize(ts), pct, tf, path))
+            n += 1
+    return n
+
+def export_space_xlsx(rows, dest, sheet="Espaco"):
+    """Planilha .xlsx com espaço ocupado por pasta, % e contagem de arquivos."""
+    widths = [len(h) for h in SPACE_EXPORT_HEADER]
+    out = []
+    n = 0
+    for name, ts, pct, tf, ds, path in _space_export_rows(rows):
+        n += 1
+        r = n + 1
+        cells = []
+
+        def s(col, v):
+            widths[col] = max(widths[col], min(len(v), 80))
+            cells.append('<c r="%s%d" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>'
+                         % (_xlsx_col(col), r, _xml(v)))
+        s(0, name)
+        cells.append('<c r="B%d" s="2"><v>%d</v></c>' % (r, ts))
+        s(2, fsize(ts))
+        cells.append('<c r="D%d" s="4"><v>%.2f</v></c>' % (r, pct))
+        cells.append('<c r="E%d" s="2"><v>%d</v></c>' % (r, tf))
+        cells.append('<c r="F%d" s="2"><v>%d</v></c>' % (r, ds))
+        s(6, path)
+        out.append('<row r="%d">%s</row>' % (r, "".join(cells)))
+    _write_xlsx_package(dest, sheet, SPACE_EXPORT_HEADER, out, widths)
+    return n
+
+def export_space_results(rows, dest):
+    """Exporta o resumo de espaço por pasta (.xlsx, .csv ou .txt)."""
+    ext = os.path.splitext(dest)[1].lower()
+    if ext == ".txt":
+        return export_space_txt(rows, dest)
+    if ext == ".csv":
+        return export_space_csv(rows, dest)
+    if ext == ".xlsx":
+        return export_space_xlsx(rows, dest)
+    raise ValueError("Formato não suportado: %s (use .xlsx, .csv ou .txt)" % ext)
+
 def open_with_default_app(path):
     """Abre o arquivo no programa padrão do sistema (Excel, LibreOffice, editor)."""
     if IS_WIN:
@@ -2165,6 +2586,26 @@ def open_with_default_app(path):
     else:
         import subprocess
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+
+def open_folder(path):
+    """Abre uma pasta no gerenciador de arquivos do sistema."""
+    p = os.path.normpath(path)
+    if IS_WIN:
+        os.startfile(p)
+    else:
+        import subprocess
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", p])
+
+def reveal_in_folder(path):
+    """Abre a pasta pai destacando o arquivo quando o sistema suporta."""
+    p = os.path.normpath(path)
+    import subprocess
+    if IS_WIN:
+        subprocess.Popen(["explorer", "/select," + p])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", p])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(p) or "."])
 
 # ===========================================================================
 # Interface (tkinter)
@@ -2206,10 +2647,13 @@ class App(object):
         self._rdata = {}      # iid -> metadados
         self._iid_by_key = {} # caminho normalizado -> iid (para remover linhas)
         self._rcount = 0      # contador O(1)
+        self._rbytes = 0      # soma de bytes dos resultados (tamanho conhecido)
         self._nsel = 0
+        self._sbytes = 0      # soma de bytes dos selecionados
         self._sroot = ""
         self._srev = False
         self._scol = None
+        self._space_win = None
         self._poll_s()
         self._poll_c()
 
@@ -2314,6 +2758,8 @@ class App(object):
         self.v_root = tk.StringVar()
         self.v_pat = tk.StringVar(value="*")
         self.v_ext = tk.StringVar()
+        self.v_size = tk.StringVar()
+        self.v_excl = tk.StringVar()
         self.v_mode = tk.StringVar(value="fast")
 
         ttk.Label(p, text="Pasta Raiz:", **L).grid(row=0, column=0, padx=(12, 4), pady=(10, 3), sticky="e")
@@ -2324,9 +2770,11 @@ class App(object):
 
         row(1, "Padrão:", self.v_pat, "contém texto (ex: IMAGENS_) ou curingas (*.shp, IMG_*)")
         row(2, "Extensões:", self.v_ext, "ex: .shp .tif .pdf  (vazio = todas)")
+        row(3, "Tamanho:", self.v_size, "ex: > 100 MB, < 10 KB, 10MB..500MB  (vazio = todos)")
+        row(4, "Ignorar pastas:", self.v_excl, "ex: _backup, node_modules, .git  (separar por vírgula)")
 
         mf = ttk.Frame(p, style="Panel.TFrame")
-        mf.grid(row=3, column=0, columnspan=3, padx=12, pady=(4, 2), sticky="w")
+        mf.grid(row=5, column=0, columnspan=3, padx=12, pady=(4, 2), sticky="w")
         ttk.Label(mf, text="Modo de busca:", style="Panel.TLabel").pack(side="left", padx=(0, 10))
         ttk.Radiobutton(mf, text="Rápida (paralela, se adapta ao servidor) — recomendado",
                         variable=self.v_mode, value="fast",
@@ -2336,7 +2784,7 @@ class App(object):
                         style="Dark.TRadiobutton").pack(side="left")
 
         xf = ttk.Frame(p, style="Panel.TFrame")
-        xf.grid(row=4, column=0, columnspan=3, padx=12, pady=(2, 2), sticky="w")
+        xf.grid(row=6, column=0, columnspan=3, padx=12, pady=(2, 2), sticky="w")
         self.v_index = tk.BooleanVar(value=self._index is not None)
         self.v_refresh = tk.BooleanVar(value=False)
         ttk.Label(xf, text="Índice local:", style="Panel.TLabel").pack(side="left", padx=(0, 10))
@@ -2353,7 +2801,7 @@ class App(object):
                    command=self._clear_index).pack(side="left")
 
         f = ttk.Frame(p, style="Panel.TFrame")
-        f.grid(row=5, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
+        f.grid(row=7, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
         self.v_case = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="Diferenciar maiúsculas/minúsculas", variable=self.v_case,
                         style="Dark.TCheckbutton").pack(side="left", padx=(0, 20))
@@ -2378,6 +2826,9 @@ class App(object):
         self.lbl_cnt.pack(side="left", padx=(8, 0), pady=5)
         self.b_export = ttk.Button(tb, text="Exportar...", style="Primary.TButton", command=self._export)
         self.b_export.pack(side="right", padx=(3, 8), pady=5)
+        self.b_space = ttk.Button(tb, text="Espaço por pasta...", style="Secondary.TButton",
+                                  command=self._open_space)
+        self.b_space.pack(side="right", padx=3, pady=5)
         for t, c in [("Inverter", self._invert),
                      ("Desmarcar todos", self._desel),
                      ("Selecionar todos", self._sel_all)]:
@@ -2405,6 +2856,7 @@ class App(object):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         self.tree.bind("<<TreeviewSelect>>", self._on_sel)
+        self.tree.bind("<Double-1>", self._on_double_click)
 
     def _copy_panel(self, p):
         p.columnconfigure(1, weight=1)
@@ -2492,7 +2944,13 @@ class App(object):
         messagebox.showwarning("Pastas não lidas", "\n".join(lines), parent=self.root)
 
     def _update_counter(self):
-        self.lbl_cnt.config(text="%d encontrados  |  %d selecionados" % (self._rcount, self._nsel))
+        if self._rbytes > 0:
+            stxt = ("%d selecionados (%s)" % (self._nsel, fsize(self._sbytes))
+                    if self._sbytes > 0 else "%d selecionados" % self._nsel)
+            self.lbl_cnt.config(text="%d encontrados (%s)  |  %s" % (
+                self._rcount, fsize(self._rbytes), stxt))
+        else:
+            self.lbl_cnt.config(text="%d encontrados  |  %d selecionados" % (self._rcount, self._nsel))
 
     # -- Busca ------------------------------------------------------------
     def _browse_root(self):
@@ -2507,6 +2965,11 @@ class App(object):
             messagebox.showwarning("Pasta não informada", "Informe uma Pasta Raiz de busca.",
                                    parent=self.root)
             return
+        try:
+            min_sz, max_sz = parse_size_filter(self.v_size.get())
+        except ValueError as e:
+            messagebox.showwarning("Tamanho inválido", str(e), parent=self.root)
+            return
         if self._running:
             # Nova busca durante uma busca (ex.: trocar o padrão): encerra a
             # atual e começa já. O que ela leu foi para o índice e é reaproveitado.
@@ -2520,6 +2983,9 @@ class App(object):
             "root": rd,
             "pattern": clean_pattern(self.v_pat.get()) or "*",
             "exts": parse_exts(self.v_ext.get()),
+            "min_size": min_sz,
+            "max_size": max_sz,
+            "exclude_dirs": parse_excludes(self.v_excl.get()),
             "case": self.v_case.get(),
             "fast_mode": self.v_mode.get() == "fast",
             "index": self.v_index.get() and self._index is not None,
@@ -2541,7 +3007,9 @@ class App(object):
         self._rdata = {}
         self._iid_by_key = {}
         self._rcount = 0
+        self._rbytes = 0
         self._nsel = 0
+        self._sbytes = 0
         self._failures = []
         self._skipped = []
         self._warn("")
@@ -2560,7 +3028,10 @@ class App(object):
                                      fast_mode=params["fast_mode"],
                                      index=self._index if params["index"] else None,
                                      refresh=params["refresh"],
-                                     retry_problems=params["retry_problems"])
+                                     retry_problems=params["retry_problems"],
+                                     min_size=params.get("min_size"),
+                                     max_size=params.get("max_size"),
+                                     exclude_dirs=params.get("exclude_dirs"))
         self._sthread.start()
         self._t0 = time.time()
         self._st("Buscando em: %s" % params["root"], self.WARN)
@@ -2622,7 +3093,7 @@ class App(object):
         except tk.TclError:
             # Nome com caractere que o Tk não exibe (Samba antigo): mostra com
             # substituição; o caminho real continua guardado para copiar/exportar.
-            safe = tuple(_SURROGATE_RE.sub("�", str(v)) for v in values)
+            safe = tuple(_SURROGATE_RE.sub("\ufffd", str(v)) for v in values)
             return self.tree.insert("", "end", values=safe, tags=(tag,))
 
     def _poll_s_once(self):
@@ -2662,6 +3133,8 @@ class App(object):
                 iid = self._insert_row((name, ext, fsize(sz), dp, fdate(mt)),
                                        "o" if self._rcount % 2 == 0 else "e")
                 self._rcount += 1
+                if sz is not None and sz > 0:
+                    self._rbytes += sz
                 self._rdata[iid] = {"path": path, "dir": dp, "size": sz, "mtime": mt}
                 self._iid_by_key[path_key(path)] = iid
 
@@ -2711,6 +3184,9 @@ class App(object):
             if not iid or iid not in self._rdata:
                 continue
             r = self._rdata.pop(iid)
+            sz = r.get("size")
+            if sz is not None and sz > 0:
+                self._rbytes = max(0, self._rbytes - sz)
             self._iid_by_key.pop(path_key(r["path"]), None)
             try:
                 self.tree.delete(iid)
@@ -2718,10 +3194,43 @@ class App(object):
                 pass
             self._rcount -= 1
 
-    # -- Seleção ----------------------------------------------------------
+    # -- Seleção e Abertura -----------------------------------------------
     def _on_sel(self, _=None):
-        self._nsel = len(self.tree.selection())
+        sel = self.tree.selection()
+        self._nsel = len(sel)
+        self._sbytes = sum((self._rdata[i].get("size") or 0) for i in sel
+                           if i in self._rdata and (self._rdata[i].get("size") or 0) > 0)
         self._update_counter()
+
+    def _on_double_click(self, event=None):
+        iid = self.tree.identify_row(event.y) if event is not None else None
+        if not iid:
+            sel = self.tree.selection()
+            iid = sel[0] if sel else None
+        if not iid or iid not in self._rdata:
+            return
+        path = self._rdata[iid]["path"]
+        threading.Thread(target=lambda: self._safe_reveal(path), daemon=True).start()
+
+    def _safe_reveal(self, path):
+        try:
+            reveal_in_folder(path)
+        except Exception as e:
+            dlog("[AVISO] não foi possível mostrar na pasta %s: %s" % (path, e))
+
+    def _open_space(self):
+        rd = self.v_root.get().strip() or self._sroot
+        if self._space_win is not None:
+            try:
+                if self._space_win.win.winfo_exists():
+                    self._space_win.win.lift()
+                    self._space_win.win.focus_force()
+                    if rd:
+                        self._space_win.load_dir(rd)
+                    return
+            except tk.TclError:
+                pass
+        self._space_win = SpaceDialog(self, rd)
 
     # -- Exportação ----------------------------------------------------------
     def _export(self):
@@ -2923,6 +3432,432 @@ class App(object):
             messagebox.showinfo("Concluído", "%d arquivo(s) copiados em %.1fs." % (done, el),
                                 parent=self.root)
 
+class SpaceDialog(object):
+    """Janela de análise de espaço por pasta (usa o índice SQLite ou resultados
+    atuais; permite navegar subpastas com duplo clique, mapear em background e
+    exportar para .xlsx/.csv/.txt sem nunca tocar disco na thread da GUI)."""
+    COLS = ("name", "size", "pct", "files", "direct", "path")
+    CLBLS = {
+        "name": "Pasta", "size": "Tamanho", "pct": "% do Pai",
+        "files": "Arquivos", "direct": "Na própria pasta", "path": "Caminho completo",
+    }
+    CWIDTHS = {
+        "name": 210, "size": 100, "pct": 75,
+        "files": 90, "direct": 115, "path": 330,
+    }
+
+    def __init__(self, app, initial_dir=""):
+        self.app = app
+        self.win = tk.Toplevel(app.root)
+        self.win.title("Espaço por pasta — %s" % APP_NAME)
+        self.win.geometry("980x580")
+        self.win.minsize(780, 420)
+        self.win.configure(bg=app.BG)
+        self._closed = False
+        self._q = queue.Queue()
+        self._scan_stop = threading.Event()
+        self._scan_thread = None
+        self._scanning = False
+        self._cur_dir = ""
+        self._rows = []          # lista de dicts exibidos
+        self._rdata = {}         # iid -> dict
+        self._root_total = {"total_size": 0, "total_files": 0}
+        self._scol = "size"
+        self._srev = True
+        self._build(initial_dir)
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self._poll()
+        if initial_dir:
+            self.load_dir(initial_dir)
+
+    def _build(self, initial_dir):
+        a = self.app
+        top = ttk.Frame(self.win, style="Panel.TFrame")
+        top.pack(fill="x", padx=0, pady=0)
+        top.columnconfigure(1, weight=1)
+
+        ttk.Label(top, text="Pasta:", style="Panel.TLabel").grid(
+            row=0, column=0, padx=(12, 4), pady=(10, 4), sticky="e")
+        self.v_dir = tk.StringVar(value=os.path.normpath(initial_dir) if initial_dir else "")
+        e = ttk.Entry(top, textvariable=self.v_dir, style="Dark.TEntry")
+        e.grid(row=0, column=1, padx=(0, 4), pady=(10, 4), sticky="ew")
+        e.bind("<Return>", lambda _e: self.load_dir(self.v_dir.get().strip()))
+        ttk.Button(top, text="Procurar...", style="Secondary.TButton",
+                   command=self._browse).grid(row=0, column=2, padx=(0, 12), pady=(10, 4))
+
+        bf = ttk.Frame(top, style="Panel.TFrame")
+        bf.grid(row=1, column=0, columnspan=3, padx=12, pady=(2, 8), sticky="ew")
+        self.b_up = ttk.Button(bf, text="⬆ Pasta acima", style="Secondary.TButton",
+                               command=self.go_up)
+        self.b_up.pack(side="left", padx=(0, 4))
+        self.b_refresh = ttk.Button(bf, text="Consultar índice", style="Primary.TButton",
+                                    command=lambda: self.load_dir(self.v_dir.get().strip()))
+        self.b_refresh.pack(side="left", padx=4)
+        self.b_scan = ttk.Button(bf, text="Mapear pasta agora", style="Success.TButton",
+                                 command=self.scan_dir)
+        self.b_scan.pack(side="left", padx=4)
+        self.b_stop = ttk.Button(bf, text="Parar", style="Danger.TButton",
+                                 command=self.stop_scan, state="disabled")
+        self.b_stop.pack(side="left", padx=4)
+        self.prog = ttk.Progressbar(bf, mode="indeterminate", length=110,
+                                    style="Accent.Horizontal.TProgressbar")
+        self.prog.pack(side="left", padx=(8, 8))
+
+        self.b_export = ttk.Button(bf, text="Exportar...", style="Primary.TButton",
+                                   command=self._export)
+        self.b_export.pack(side="right", padx=(4, 0))
+        ttk.Button(bf, text="Abrir no sistema", style="Secondary.TButton",
+                   command=self._open_selected).pack(side="right", padx=4)
+        ttk.Button(bf, text="Usar como Pasta Raiz", style="Secondary.TButton",
+                   command=self._use_as_root).pack(side="right", padx=4)
+
+        ttk.Separator(self.win, orient="horizontal").pack(fill="x")
+
+        sf = ttk.Frame(self.win, style="Panel.TFrame")
+        sf.pack(fill="x")
+        self.lbl_sum = ttk.Label(
+            sf, text="  Informe uma pasta para ver o espaço ocupado por cada subpasta.",
+            style="Counter.TLabel")
+        self.lbl_sum.pack(side="left", padx=8, pady=5)
+        ttk.Label(sf, text="Duplo clique em uma subpasta para entrar nela  ",
+                  style="Sub.TLabel").pack(side="right", padx=8, pady=5)
+
+        tf = ttk.Frame(self.win, style="Dark.TFrame")
+        tf.pack(fill="both", expand=True, padx=4, pady=4)
+        tf.rowconfigure(0, weight=1)
+        tf.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(tf, columns=self.COLS, show="headings",
+                                 selectmode="browse", style="Results.Treeview")
+        for c in self.COLS:
+            self.tree.heading(c, text=self.CLBLS[c], command=lambda col=c: self._sort(col))
+            self.tree.column(c, width=self.CWIDTHS[c],
+                             anchor="w" if c in ("name", "path") else "e" if c in ("size", "pct", "files", "direct") else "center",
+                             stretch=(c == "path"))
+        self.tree.tag_configure("o", background=a.RODD)
+        self.tree.tag_configure("e", background=a.REVEN)
+        vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview,
+                            style="Dark.Vertical.TScrollbar")
+        hsb = ttk.Scrollbar(tf, orient="horizontal", command=self.tree.xview,
+                            style="Dark.Horizontal.TScrollbar")
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.tree.bind("<Double-1>", self._on_double_click)
+
+        self.lbl_st = ttk.Label(self.win, text="  Pronto.", style="Status.TLabel")
+        self.lbl_st.pack(fill="x", side="bottom", padx=4, pady=3)
+
+    def _browse(self):
+        d = filedialog.askdirectory(parent=self.win, title="Escolher pasta para análise de espaço",
+                                    mustexist=True)
+        if d:
+            self.load_dir(os.path.normpath(d))
+
+    def go_up(self):
+        cur = (self._cur_dir or self.v_dir.get()).strip()
+        if not cur:
+            return
+        norm = os.path.normpath(cur)
+        parent = os.path.dirname(norm.rstrip("\\/"))
+        if parent and parent != norm:
+            self.load_dir(parent)
+
+    def load_dir(self, target_dir):
+        """Consulta o espaço de `target_dir` em thread separada (zero I/O na GUI)."""
+        target_dir = (target_dir or "").strip()
+        if not target_dir:
+            return
+        norm = os.path.normpath(target_dir)
+        self._cur_dir = norm
+        self.v_dir.set(norm)
+        self.lbl_st.config(text="  Calculando espaço por pasta em %s..." % norm,
+                           foreground=self.app.WARN)
+        idx = self.app._index
+        excl = parse_excludes(self.app.v_excl.get())
+        rdata_snap = list(self.app._rdata.values())
+        q = self._q
+
+        def work():
+            try:
+                if idx is not None:
+                    sp = idx.folder_space(norm, exclude_dirs=excl)
+                    if sp and (sp["scanned_dirs"] > 0 or sp["total_files"] > 0):
+                        items = folder_space_children(sp, norm)
+                        q.put(("DATA", norm, items, sp, "índice local"))
+                        return
+                if rdata_snap:
+                    sp = summarize_rows_space(rdata_snap, norm, exclude_dirs=excl)
+                    if sp and (sp["scanned_dirs"] > 0 or sp["total_files"] > 0):
+                        items = folder_space_children(sp, norm)
+                        q.put(("DATA", norm, items, sp, "resultados da busca atual"))
+                        return
+                q.put(("EMPTY", norm))
+            except Exception as e:
+                dlog("[ERRO] espaço por pasta (%s): %s" % (norm, e))
+                q.put(("ERR", str(e)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def scan_dir(self):
+        """Varre `v_dir` em segundo plano alimentando o índice e atualizando a tabela."""
+        target_dir = (self.v_dir.get() or self._cur_dir).strip()
+        if not target_dir:
+            messagebox.showwarning("Pasta não informada", "Informe uma pasta para mapear.",
+                                   parent=self.win)
+            return
+        norm = os.path.normpath(target_dir)
+        self._cur_dir = norm
+        self.v_dir.set(norm)
+        if self._scanning:
+            self._scan_stop.set()
+        self._scanning = True
+        self._scan_stop = threading.Event()
+        self.b_scan.config(state="disabled")
+        self.b_stop.config(state="normal")
+        self.prog.start(12)
+        self.lbl_st.config(text="  Mapeando %s..." % norm, foreground=self.app.WARN)
+        idx = self.app._index
+        excl = parse_excludes(self.app.v_excl.get())
+        stop_ev = self._scan_stop
+        q = self._q
+
+        def runner():
+            sq = queue.Queue(maxsize=2000)
+            st = SearchThread(norm, "*", set(), False, sq, stop_ev,
+                              fast_mode=True, index=idx, refresh=True,
+                              exclude_dirs=excl, want_meta=True)
+            self._scan_thread = st
+            st.start()
+            mem_rows = [] if idx is None else None
+            last_snap = time.time()
+            while True:
+                try:
+                    item = sq.get(timeout=0.2)
+                except queue.Empty:
+                    if not st.is_alive() and sq.empty():
+                        break
+                    item = None
+                if item is SearchThread.DONE:
+                    break
+                if item is not None:
+                    tag = item[0]
+                    if tag == "__STATUS__":
+                        q.put(("SCAN_ST", item[1]))
+                    elif tag not in ("__ERR__", "__REMOVE__", "__REMOVE_DIR__"):
+                        if mem_rows is not None:
+                            path, _name, _ext, sz, dp, mt = item
+                            mem_rows.append({"path": path, "dir": dp, "size": sz, "mtime": mt})
+                now = time.time()
+                if now - last_snap >= 1.5:
+                    last_snap = now
+                    if idx is not None:
+                        idx.flush()
+                        sp = idx.folder_space(norm, exclude_dirs=excl)
+                    else:
+                        sp = summarize_rows_space(mem_rows, norm, exclude_dirs=excl)
+                    items = folder_space_children(sp, norm)
+                    q.put(("DATA", norm, items, sp, "mapeamento em andamento"))
+            if idx is not None:
+                idx.flush()
+                sp = idx.folder_space(norm, exclude_dirs=excl)
+            else:
+                sp = summarize_rows_space(mem_rows, norm, exclude_dirs=excl)
+            items = folder_space_children(sp, norm)
+            q.put(("SCAN_DONE", norm, items, sp, stop_ev.is_set()))
+        threading.Thread(target=runner, daemon=True).start()
+
+    def stop_scan(self):
+        self._scan_stop.set()
+        self.b_stop.config(state="disabled")
+        self.lbl_st.config(text="  Parando mapeamento (o que já foi lido fica salvo no índice)...",
+                           foreground=self.app.WARN)
+
+    def _populate(self, norm, items, rt, origin):
+        try:
+            tw = self.tree._w
+            self.tree.tk.eval("catch {%s delete [%s children {}]}" % (tw, tw))
+        except tk.TclError:
+            pass
+        self._rows = list(items)
+        self._rdata = {}
+        self._root_total = rt
+        for n, it in enumerate(self._rows):
+            iid = self.tree.insert(
+                "", "end",
+                values=(
+                    it["name"],
+                    fsize(it["total_size"]),
+                    "%.1f%%" % it["pct"],
+                    "%d" % it["total_files"],
+                    fsize(it["direct_size"]),
+                    it["path"],
+                ),
+                tags=("o" if n % 2 == 0 else "e",),
+            )
+            self._rdata[iid] = it
+        self.lbl_sum.config(
+            text="  Total em %s: %s em %d arquivo(s)  |  %d item(ns)"
+            % (os.path.basename(norm) or norm, fsize(rt["total_size"]),
+               rt["total_files"], len(self._rows)))
+        if not self._scanning:
+            self.lbl_st.config(
+                text="  Espaço calculado (%s): %s em %d arquivo(s)."
+                % (origin, fsize(rt["total_size"]), rt["total_files"]),
+                foreground=self.app.OK)
+
+    def _poll(self):
+        if self._closed:
+            return
+        try:
+            if not self.win.winfo_exists():
+                self._closed = True
+                return
+            while True:
+                try:
+                    m = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                kind = m[0]
+                if kind == "DATA":
+                    _, norm, items, rt, origin = m
+                    self._populate(norm, items, rt, origin)
+                elif kind == "EMPTY":
+                    _, norm = m
+                    self._populate(norm, [], {"total_size": 0, "total_files": 0}, "vazio")
+                    self.lbl_sum.config(
+                        text="  Pasta ainda não indexada: clique em \"Mapear pasta agora\" para calcular.")
+                    self.lbl_st.config(
+                        text="  Nenhum dado no índice para %s. Clique em \"Mapear pasta agora\"." % norm,
+                        foreground=self.app.WARN)
+                elif kind == "SCAN_ST":
+                    self.lbl_st.config(text="  " + m[1], foreground=self.app.WARN)
+                elif kind == "SCAN_DONE":
+                    _, norm, items, rt, stopped = m
+                    self._scanning = False
+                    self.b_scan.config(state="normal")
+                    self.b_stop.config(state="disabled")
+                    self.prog.stop()
+                    self._populate(norm, items, rt, "mapeamento pausado" if stopped else "índice atualizado")
+                    self.lbl_st.config(
+                        text="  Mapeamento %s: %s em %d arquivo(s)."
+                        % ("pausado (dados salvos no índice)" if stopped else "concluído",
+                           fsize(rt["total_size"]), rt["total_files"]),
+                        foreground=self.app.WARN if stopped else self.app.OK)
+                elif kind == "ERR":
+                    self.lbl_st.config(text="  Erro: " + m[1], foreground=self.app.ERR)
+        except Exception:
+            dlog("[ERRO] SpaceDialog poll\n%s" % traceback.format_exc())
+        if not self._closed:
+            self.win.after(100, self._poll)
+
+    def _on_double_click(self, event=None):
+        iid = self.tree.identify_row(event.y) if event is not None else None
+        if not iid:
+            sel = self.tree.selection()
+            iid = sel[0] if sel else None
+        if not iid or iid not in self._rdata:
+            return
+        it = self._rdata[iid]
+        if it.get("is_self"):
+            return
+        self.load_dir(it["path"])
+
+    def _selected_or_cur_dir(self):
+        sel = self.tree.selection()
+        if sel and sel[0] in self._rdata:
+            return self._rdata[sel[0]]["path"]
+        return (self._cur_dir or self.v_dir.get()).strip()
+
+    def _use_as_root(self):
+        p = self._selected_or_cur_dir()
+        if p:
+            self.app.v_root.set(os.path.normpath(p))
+            self.app.root.lift()
+
+    def _open_selected(self):
+        p = self._selected_or_cur_dir()
+        if p:
+            threading.Thread(target=lambda: self._safe_open_folder(p), daemon=True).start()
+
+    def _safe_open_folder(self, path):
+        try:
+            open_folder(path)
+        except Exception as e:
+            dlog("[AVISO] não foi possível abrir pasta %s: %s" % (path, e))
+
+    def _sort(self, col):
+        self._srev = (not self._srev) if self._scol == col else (col in ("size", "pct", "files", "direct"))
+        self._scol = col
+        kids = self.tree.get_children()
+        key_map = {"size": "total_size", "pct": "pct", "files": "total_files", "direct": "direct_size"}
+        if col in key_map:
+            k = key_map[col]
+            items = sorted(kids, key=lambda i: self._rdata.get(i, {}).get(k, 0), reverse=self._srev)
+        else:
+            vals = {i: self.tree.set(i, col).lower() for i in kids}
+            items = sorted(kids, key=vals.get, reverse=self._srev)
+        for n, iid in enumerate(items):
+            self.tree.move(iid, "", n)
+            self.tree.item(iid, tags=("o" if n % 2 == 0 else "e",))
+        arr = " ▲" if not self._srev else " ▼"
+        for c in self.COLS:
+            self.tree.heading(c, text=self.CLBLS[c] + (arr if c == col else ""))
+
+    def _export(self):
+        if not self._rows:
+            messagebox.showinfo("Exportar", "Não há dados de espaço para exportar.", parent=self.win)
+            return
+        rows = [self._rdata[i] for i in self.tree.get_children() if i in self._rdata]
+        dest = filedialog.asksaveasfilename(
+            parent=self.win, title="Exportar espaço por pasta",
+            initialfile="espaco_%s" % time.strftime("%Y-%m-%d_%H%M"),
+            defaultextension=".xlsx",
+            filetypes=[("Planilha Excel", "*.xlsx"),
+                       ("CSV (Excel, LibreOffice, QGIS)", "*.csv"),
+                       ("Texto formatado", "*.txt")])
+        if not dest:
+            return
+        dest = os.path.normpath(dest)
+        if os.path.splitext(dest)[1].lower() not in EXPORT_FORMATS:
+            dest += ".xlsx"
+        self.b_export.config(state="disabled")
+        self.lbl_st.config(text="  Exportando %d linha(s) para %s..." % (len(rows), dest),
+                           foreground=self.app.WARN)
+        done_q = queue.Queue()
+
+        def work():
+            try:
+                n = export_space_results(rows, dest)
+                done_q.put((n, None))
+            except Exception as e:
+                done_q.put((0, str(e)))
+
+        def poll():
+            if self._closed:
+                return
+            try:
+                n, err = done_q.get_nowait()
+            except queue.Empty:
+                self.win.after(100, poll)
+                return
+            self.b_export.config(state="normal")
+            if err:
+                self.lbl_st.config(text="  Falha ao exportar: " + err, foreground=self.app.ERR)
+                messagebox.showerror("Exportar", "Não foi possível exportar:\n\n%s" % err, parent=self.win)
+            else:
+                self.lbl_st.config(text="  Exportado(s) %d item(ns) para %s" % (n, dest),
+                                   foreground=self.app.OK)
+        threading.Thread(target=work, daemon=True).start()
+        self.win.after(100, poll)
+
+    def _close(self):
+        self._closed = True
+        self._scan_stop.set()
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
 # ===========================================================================
 def _hide_own_console():
     """Esconde a janela de console quando ela foi criada SÓ para este processo
@@ -2942,11 +3877,118 @@ def _hide_own_console():
     except Exception:
         pass
 
+def _parse_cli(argv):
+    """Interpreta argumentos de linha de comando sem impedir os flags existentes."""
+    opts = {
+        "index_path": INDEX_PATH,
+        "no_index": "--no-index" in argv,
+        "index_dir": None,
+        "space_dir": None,
+        "export": None,
+        "excludes": (),
+        "refresh": "--atualizar" in argv,
+        "top": 30,
+    }
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--indice", "--index") and i + 1 < len(argv):
+            opts["index_path"] = os.path.normpath(argv[i + 1])
+            i += 2
+        elif a == "--indexar" and i + 1 < len(argv):
+            opts["index_dir"] = os.path.normpath(argv[i + 1])
+            i += 2
+        elif a == "--espaco" and i + 1 < len(argv):
+            opts["space_dir"] = os.path.normpath(argv[i + 1])
+            i += 2
+        elif a == "--exportar" and i + 1 < len(argv):
+            opts["export"] = os.path.normpath(argv[i + 1])
+            i += 2
+        elif a == "--ignorar" and i + 1 < len(argv):
+            opts["excludes"] = parse_excludes(argv[i + 1])
+            i += 2
+        elif a == "--top" and i + 1 < len(argv):
+            try:
+                opts["top"] = max(1, int(argv[i + 1]))
+            except ValueError:
+                pass
+            i += 2
+        else:
+            i += 1
+    return opts
+
+def _run_cli(opts):
+    """Modo de linha de comando (sem abrir janela): `--indexar` e/ou `--espaco`."""
+    rotate_log()
+    index = None
+    if not opts["no_index"]:
+        index = Index(opts["index_path"])
+    try:
+        scan_target = opts["index_dir"]
+        if not scan_target and opts["space_dir"]:
+            if index is None:
+                scan_target = opts["space_dir"]
+            elif opts["refresh"]:
+                scan_target = opts["space_dir"]
+            else:
+                sp = index.folder_space(opts["space_dir"], exclude_dirs=opts["excludes"])
+                if not sp or (sp["scanned_dirs"] == 0 and sp["total_files"] == 0):
+                    scan_target = opts["space_dir"]
+        mem_rows = []
+        if scan_target:
+            t0 = time.time()
+            q = queue.Queue(maxsize=4000)
+            stop = threading.Event()
+            st = SearchThread(scan_target, "*", set(), False, q, stop,
+                              fast_mode=True, index=index, refresh=True,
+                              exclude_dirs=opts["excludes"], want_meta=True)
+            st.start()
+            count = 0
+            while True:
+                item = q.get()
+                if item is SearchThread.DONE:
+                    break
+                tag = item[0]
+                if tag == "__ERR__":
+                    sys.stderr.write("Erro: %s\n" % item[1])
+                elif tag not in ("__STATUS__", "__REMOVE__", "__REMOVE_DIR__"):
+                    count += 1
+                    if index is None:
+                        path, _name, _ext, sz, dp, mt = item
+                        mem_rows.append({"path": path, "dir": dp, "size": sz, "mtime": mt})
+            if index is not None:
+                index.flush()
+            el = time.time() - t0
+            print("Indexado: %s (%d arquivos em %.1fs) -> %s" % (
+                scan_target, count, el, opts["index_path"] if index else "memória"))
+        if opts["space_dir"]:
+            target = opts["space_dir"]
+            if index is not None:
+                sp = index.folder_space(target, exclude_dirs=opts["excludes"])
+            else:
+                sp = summarize_rows_space(mem_rows, target, exclude_dirs=opts["excludes"])
+            items = folder_space_children(sp, target)
+            print("\nEspaço por pasta em: %s" % target)
+            print("Total: %s em %d arquivo(s)\n" % (fsize(sp["total_size"]), sp["total_files"]))
+            for it in items[:opts["top"]]:
+                print("%12s  %5.1f%%  %8d arq.  %s" % (
+                    fsize(it["total_size"]), it["pct"], it["total_files"], it["path"]))
+            if opts["export"]:
+                export_space_results(items, opts["export"])
+                print("\nExportado para: %s" % opts["export"])
+    finally:
+        if index is not None:
+            index.close()
+    return 0
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--version" in argv:
         print("%s %s" % (APP_NAME, __version__))
         return 0
+    opts = _parse_cli(argv)
+    if opts["index_dir"] or opts["space_dir"]:
+        return _run_cli(opts)
     if tk is None:
         sys.stderr.write("Erro: tkinter não está disponível neste Python.\n"
                          "Linux: sudo apt install python3-tk  (ou dnf install python3-tkinter)\n")
@@ -2956,12 +3998,12 @@ def main(argv=None):
     dlog("=== INÍCIO v%s | Python %s | %s ===" % (
         __version__, platform.python_version(), platform.platform()))
     index = None
-    if "--no-index" not in argv:
+    if not opts["no_index"]:
         try:
-            index = Index()
-            dlog("Índice local: %s" % INDEX_PATH)
+            index = Index(opts["index_path"])
+            dlog("Índice local: %s" % opts["index_path"])
         except Exception as e:
-            dlog("[ÍNDICE] indisponível (%s): %s" % (INDEX_PATH, e))
+            dlog("[ÍNDICE] indisponível (%s): %s" % (opts["index_path"], e))
     root = tk.Tk()
     app = App(root, index)
 
