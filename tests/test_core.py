@@ -29,11 +29,13 @@ def make_tree(base, files):
 
 
 def run_search(root, pattern="*", exts=(), case=False, fast=True, stop=None,
-               index=None, refresh=False, thread_out=None, retry_problems=False, channels=None):
+               index=None, refresh=False, thread_out=None, retry_problems=False,
+               channels=None, min_size=None, max_size=None, exclude_dirs=()):
     q, ev = queue.Queue(maxsize=2000), stop or threading.Event()
     t = g.SearchThread(root, pattern, list(exts), case, q, ev, fast_mode=fast,
                        index=index, refresh=refresh, retry_problems=retry_problems,
-                       channels=channels)
+                       channels=channels, min_size=min_size, max_size=max_size,
+                       exclude_dirs=exclude_dirs)
     if thread_out is not None:
         thread_out.append(t)
     t.start()
@@ -772,7 +774,8 @@ class TestExport(unittest.TestCase):
         import csv
         p = os.path.join(self.d, "r.csv")
         self.assertEqual(g.export_results(self.ROWS, p), 2)
-        raw = open(p, "rb").read()
+        with open(p, "rb") as fb:
+            raw = fb.read()
         self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), "BOM UTF-8 para o Excel reconhecer acentos")
         with open(p, encoding="utf-8-sig", newline="") as f:
             rows = list(csv.reader(f, delimiter=";"))
@@ -787,7 +790,8 @@ class TestExport(unittest.TestCase):
     def test_txt_one_path_per_line(self):
         p = os.path.join(self.d, "r.txt")
         g.export_results(self.ROWS, p)
-        lines = open(p, encoding="utf-8").read().splitlines()
+        with open(p, encoding="utf-8") as f:
+            lines = f.read().splitlines()
         self.assertEqual(lines, [r["path"] for r in self.ROWS])
 
     def test_xlsx_is_valid_spreadsheet(self):
@@ -1046,5 +1050,218 @@ class TestGuiSmoke(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
+class TestSizeAndExcludeFilters(unittest.TestCase):
+    """Filtros de tamanho (`> 100 MB`, `10MB..500MB`) e exclusão de pastas (`_backup, .git`)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="gff_flt_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_parse_size_and_filter_expressions(self):
+        self.assertEqual(g.parse_size_filter(""), (None, None))
+        self.assertEqual(g.parse_size_filter("> 100 MB"), (100 * 1024 ** 2, None))
+        self.assertEqual(g.parse_size_filter("1,5 GB"), (int(1.5 * 1024 ** 3), None))
+        self.assertEqual(g.parse_size_filter("< 10 KB"), (None, 10 * 1024))
+        self.assertEqual(g.parse_size_filter("10MB..500MB"), (10 * 1024 ** 2, 500 * 1024 ** 2))
+        self.assertEqual(g.parse_size_filter("500 MB - 10 MB"), (10 * 1024 ** 2, 500 * 1024 ** 2))
+        with self.assertRaises(ValueError):
+            g.parse_size_filter("abc")
+        with self.assertRaises(ValueError):
+            g.parse_size_filter("10 XB")
+
+    def test_search_filters_by_size_and_keeps_index_complete(self):
+        data = os.path.join(self.d, "dados")
+        os.makedirs(data)
+        small = os.path.join(data, "pequeno.tif")
+        medium = os.path.join(data, "medio.tif")
+        big = os.path.join(data, "grande.tif")
+        with open(small, "wb") as f:
+            f.write(b"a" * 500)
+        with open(medium, "wb") as f:
+            f.write(b"b" * 5000)
+        with open(big, "wb") as f:
+            f.write(b"c" * 50000)
+        idx = g.Index(os.path.join(self.d, "i.sqlite"))
+        try:
+            # 1ª busca com filtro >= 4 KB lê do disco, filtra os resultados na
+            # tela mas grava TODOS os arquivos no índice.
+            found, errs = run_search(data, "*", index=idx, min_size=4000)
+            self.assertEqual(errs, [])
+            self.assertEqual(sorted(f[1] for f in found), ["grande.tif", "medio.tif"])
+
+            # 2ª busca sem filtro vem do índice e traz inclusive o arquivo pequeno!
+            found_all, _ = run_search(data, "*", index=idx)
+            self.assertEqual(sorted(f[1] for f in found_all),
+                             ["grande.tif", "medio.tif", "pequeno.tif"])
+
+            # 3ª busca por faixa (1 KB .. 10 KB) direto do índice:
+            found_mid, _ = run_search(data, "*", index=idx, min_size=1000, max_size=10000)
+            self.assertEqual([f[1] for f in found_mid], ["medio.tif"])
+        finally:
+            idx.close()
+
+    def test_exclude_dirs_live_and_from_index(self):
+        data = os.path.join(self.d, "dados")
+        make_tree(data, [
+            "obra/mapa.shp",
+            "_backup/antigo.shp",
+            "node_modules/pkg/index.shp",
+            "temp_2024/rascunho.shp",
+        ])
+        excl = g.parse_excludes("_backup, node_modules; temp_*")
+        found, errs = run_search(data, "*.shp", exclude_dirs=excl)
+        self.assertEqual(errs, [])
+        self.assertEqual([f[1] for f in found], ["mapa.shp"])
+
+        # E quando o índice completo já existe, consultar com exclude_dirs filtra igual:
+        idx = g.Index(os.path.join(self.d, "i.sqlite"))
+        try:
+            run_search(data, "*.shp", index=idx)
+            found_idx, _ = run_search(data, "*.shp", index=idx, exclude_dirs=excl)
+            self.assertEqual([f[1] for f in found_idx], ["mapa.shp"])
+        finally:
+            idx.close()
+
+
+class TestFolderSpace(unittest.TestCase):
+    """Agregação de espaço por pasta (índice SQLite, memória e exportação)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="gff_spc_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_aggregate_folder_space_and_children(self):
+        data = os.path.join(self.d, "raiz")
+        files = {
+            "raiz.txt": 1000,
+            "A/a1.bin": 10000,
+            "A/sub/a2.bin": 30000,
+            "B/b1.bin": 5000,
+            "_lixo/ignorar.bin": 99000,
+        }
+        for rel, sz in files.items():
+            p = os.path.join(data, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(b"x" * sz)
+        idx = g.Index(os.path.join(self.d, "i.sqlite"))
+        try:
+            run_search(data, "*", index=idx)
+            sp = idx.folder_space(data, exclude_dirs=("_lixo",))
+            self.assertEqual(sp["total_size"], 46000)
+            self.assertEqual(sp["total_files"], 4)
+
+            items = g.folder_space_children(sp, data)
+            by_name = {it["name"]: it for it in items}
+            self.assertEqual(by_name["A"]["total_size"], 40000)
+            self.assertEqual(by_name["A"]["total_files"], 2)
+            self.assertEqual(by_name["B"]["total_size"], 5000)
+            self.assertEqual(by_name["[Arquivos na própria pasta]"]["total_size"], 1000)
+
+            # Drill-down para a subpasta A:
+            items_a = g.folder_space_children(sp, os.path.join(data, "A"))
+            by_a = {it["name"]: it for it in items_a}
+            self.assertEqual(by_a["sub"]["total_size"], 30000)
+            self.assertEqual(by_a["[Arquivos na própria pasta]"]["total_size"], 10000)
+        finally:
+            idx.close()
+
+    def test_export_space_results_formats(self):
+        import csv
+        import zipfile
+        rows = [
+            {"name": "Projetos", "total_size": 10485760, "pct": 80.0,
+             "total_files": 25, "direct_size": 1024, "path": os.path.join(self.d, "Projetos")},
+            {"name": "Temp", "total_size": 2621440, "pct": 20.0,
+             "total_files": 5, "direct_size": 2621440, "path": os.path.join(self.d, "Temp")},
+        ]
+        for ext in (".csv", ".txt", ".xlsx"):
+            dest = os.path.join(self.d, "espaco" + ext)
+            self.assertEqual(g.export_space_results(rows, dest), 2)
+            self.assertTrue(os.path.exists(dest))
+        with open(os.path.join(self.d, "espaco.csv"), encoding="utf-8-sig", newline="") as f:
+            csv_rows = list(csv.reader(f, delimiter=";"))
+        self.assertEqual(csv_rows[0], list(g.SPACE_EXPORT_HEADER))
+        self.assertEqual(csv_rows[1][0], "Projetos")
+        with zipfile.ZipFile(os.path.join(self.d, "espaco.xlsx")) as z:
+            self.assertIsNone(z.testzip())
+
+
+class TestCliAndGuiNewFeatures(unittest.TestCase):
+    """CLI (`--indexar`, `--espaco`) e diálogo `SpaceDialog` na GUI."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="gff_cli_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_cli_indexar_and_espaco(self):
+        data = os.path.join(self.d, "dados")
+        make_tree(data, ["sub1/a.tif", "sub1/b.tif", "sub2/c.tif"])
+        idx_path = os.path.join(self.d, "cli.sqlite")
+        csv_path = os.path.join(self.d, "espaco.csv")
+        rc = g.main([
+            "--indice", idx_path,
+            "--indexar", data,
+            "--espaco", data,
+            "--exportar", csv_path,
+        ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(idx_path))
+        self.assertTrue(os.path.exists(csv_path))
+
+    def test_gui_filters_and_space_dialog(self):
+        if g.tk is None:
+            self.skipTest("tkinter indisponível")
+        try:
+            root = g.tk.Tk()
+        except g.tk.TclError as e:
+            self.skipTest("sem display: %s" % e)
+        base = tempfile.mkdtemp(prefix="gff_gui_")
+        idx = g.Index(os.path.join(base, "idx.sqlite"))
+        try:
+            data = os.path.join(base, "dados")
+            make_tree(data, ["alfa/x.shp", "alfa/y.shp", "beta/z.shp", "_ignorar/w.shp"])
+            root.withdraw()
+            app = g.App(root, idx)
+            app.v_root.set(data)
+            app.v_excl.set("_ignorar")
+            app.v_size.set("> 1 KB")
+            app._start()
+            deadline = time.time() + 15
+            while (app._running or app._rcount == 0) and time.time() < deadline:
+                root.update()
+                time.sleep(0.02)
+            self.assertEqual(app._rcount, 3)
+            self.assertGreater(app._rbytes, 0)
+            self.assertIn("KB", app.lbl_cnt.cget("text"))
+
+            # Abre a janela de espaço por pasta e espera carregar do índice:
+            app._open_space()
+            dlg = app._space_win
+            self.assertIsNotNone(dlg)
+            deadline = time.time() + 10
+            while not dlg._rows and time.time() < deadline:
+                root.update()
+                time.sleep(0.02)
+            names = [r["name"] for r in dlg._rows]
+            self.assertIn("alfa", names)
+            self.assertIn("beta", names)
+            self.assertNotIn("_ignorar", names)
+            dlg._close()
+        finally:
+            idx.close()
+            root.destroy()
+            dlg = app = root = None
+            gc.collect()
+            shutil.rmtree(base, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
+

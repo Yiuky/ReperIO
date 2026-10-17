@@ -13,7 +13,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.8+"></a>
   <a href="#-requisitos"><img src="https://img.shields.io/badge/Plataforma-Windows%20%7C%20Linux-0078D6.svg" alt="Windows | Linux"></a>
   <a href="#-por-que-sem-dependências"><img src="https://img.shields.io/badge/Depend%C3%AAncias-nenhuma-success.svg" alt="Sem dependências"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.5.0-28A745.svg" alt="Versão v2.5.0"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.6.0-28A745.svg" alt="Versão v2.6.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT"></a>
   <a href="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml"><img src="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml/badge.svg" alt="Testes"></a>
 </p>
@@ -36,12 +36,13 @@
 ## 📌 O que faz
 
 O ReperIO varre pastas locais e **servidores de arquivos de rede** (SMB/CIFS, DFS, unidades mapeadas)
-atrás de arquivos por **nome e extensão**: centenas de milhares de pastas, pastas com dezenas de
+atrás de arquivos por **nome, extensão e tamanho**: centenas de milhares de pastas, pastas com dezenas de
 milhares de arquivos e servidores que às vezes param de responder. Os achados formam o seu
-**repertório**: você pode filtrar, ordenar, **exportar para Excel, CSV ou TXT** e **copiar em lote**.
+**repertório**: você pode filtrar, inspecionar o **espaço ocupado por pasta**, ordenar, **exportar para
+Excel, CSV ou TXT** e **copiar em lote**.
 
 Foi criado para bancos de imagens e dados geográficos (GIS), mas serve a qualquer acervo grande de
-arquivos em rede.
+arquivos em rede ou disco local.
 
 > Projeto **pessoal e independente** de Joberth Firmino Gambati: não é um produto oficial de nenhuma
 > instituição nem fala em nome dela.
@@ -57,11 +58,12 @@ faz: **acha** os arquivos e compõe o **repertório** do que foi encontrado. O *
 
 | | |
 |---|---|
-| 🔎 **Busca por nome e extensão** | "Contém" (`IMAGENS_`) ou curingas (`*.shp`, `LC08_*_B4.TIF`, `IMG_??`), com filtro de extensões |
+| 🔎 **Busca e filtros** | "Contém" (`IMAGENS_`) ou curingas (`*.shp`, `LC08_*_B4.TIF`), extensões, **tamanho** (`> 100 MB`, `10MB..500MB`) e **exclusão de pastas** (`_backup, node_modules`) |
+| 📊 **Espaço por pasta** | Mostra quanto espaço cada pasta e subpasta ocupa (com `%`, quantidade de arquivos, navegação com duplo clique, pausa/retomada e exportação) |
 | ⚡ **Rápido em pastas enormes** | Leitura em paralelo e em lotes grandes por ida ao servidor (~3× mais rápido em pastas com 65 mil arquivos) |
-| 🗂️ **Índice local** | A 2ª busca na mesma pasta sai em segundos, com qualquer padrão e até com o servidor fora do ar |
+| 🗂️ **Índice local e compartilhável** | A 2ª busca na mesma pasta sai em segundos, com qualquer padrão e até com o servidor fora do ar; suporta indexação agendada via CLI (`--indexar`) |
 | 🛡️ **Não trava** | Uma pasta que o servidor não consegue abrir não segura a busca: o ReperIO troca de conexão e trata a pasta à parte |
-| 📤 **Exportar** | Resultados para **Excel (.xlsx)**, **CSV** ou **TXT**, sem precisar do Excel para gerar |
+| 📤 **Exportar** | Resultados e relatórios de espaço para **Excel (.xlsx)**, **CSV** ou **TXT**, sem precisar do Excel para gerar |
 | 📋 **Cópia paralela** | 4 cópias simultâneas, em blocos de 1 MB, com cancelamento a qualquer momento e nomes repetidos renomeados |
 | 💻 **Portátil** | Executável único para Windows e Linux; sem instalação, sem administrador, sem `pip` |
 
@@ -95,13 +97,18 @@ Linux); caso contrário, abre o executável. Nos dois casos, nada é baixado nem
 ## 🚀 Uso rápido
 
 1. **Pasta Raiz:** onde buscar. Aceita unidade mapeada (`Y:\Imagens`), caminho de rede
-   (`\\servidor\dados`) ou pasta local.
+   (`\\servidor\dados`) ou pasta local (`C:\Users\voce`).
 2. **Padrão:** texto contido no nome (`IMAGENS_`) ou curingas (`*.tif`, `LC08_*_B4*`).
 3. **Extensões** (opcional): `.shp .tif .pdf`, separadas por espaço ou vírgula.
-4. **Iniciar busca.** Os resultados aparecem enquanto a busca acontece. Clicar em *Iniciar busca* de
+4. **Tamanho** (opcional): `> 100 MB`, `1,5 GB`, `< 10 KB` ou faixa `10MB..500MB`.
+5. **Ignorar pastas** (opcional): `_backup, MOSAICOS, node_modules, .git`, separadas por vírgula.
+6. **Iniciar busca.** Os resultados aparecem enquanto a busca acontece. Clicar em *Iniciar busca* de
    novo troca o padrão sem perder o que já foi lido.
-5. Selecione os arquivos (Shift/Ctrl + clique, *Selecionar todos*, *Inverter*) e:
-   - **Exportar...** a lista para Excel, CSV ou TXT; ou
+7. Na lista de resultados:
+   - **Duplo clique** em um arquivo abre a pasta dele no sistema já destacando o arquivo;
+   - **Espaço por pasta...** abre o painel interativo com o consumo de espaço de cada subpasta (com
+     duplo clique para entrar nas subpastas, botão *Mapear pasta agora* com pausa/retomada e exportação);
+   - **Exportar...** salva a lista em Excel, CSV ou TXT; ou
    - informe o **Destino** e clique **Copiar selecionados**. *Plana* coloca tudo numa pasta;
      *Manter estrutura original* reproduz as subpastas.
 
@@ -127,20 +134,26 @@ O botão **Exportar...** grava todos os resultados, ou só os selecionados, na o
 - O CSV usa `;`, padrão do Excel em português; num Windows em inglês, prefira o `.xlsx`.
 - Nomes que começam com `=`, `+`, `-` ou `@` são neutralizados no CSV, contra injeção de fórmulas.
 
-## 🗂️ Índice local
+## 🗂️ Índice local e linha de comando (CLI)
 
 Toda busca grava num índice local todos os arquivos de cada pasta lida, não só os que casaram com o
-padrão. Na busca seguinte:
+padrão ou filtro de tamanho. Na busca seguinte:
 
 | Situação | O que acontece |
 |---|---|
-| Pasta já indexada por completo | Resultados em segundos, **sem tocar no servidor**, com qualquer padrão |
-| Busca anterior interrompida | O que já foi lido sai do índice na hora; a varredura **continua de onde parou** |
+| Pasta já indexada por completo | Resultados e **Espaço por pasta** em segundos, **sem tocar no servidor**, com qualquer padrão |
+| Busca ou mapeamento interrompido | O que já foi lido sai do índice na hora; a varredura **continua exatamente de onde parou** |
 | **Verificar alterações no servidor** marcado | Confere a data de cada pasta e **relê só as que mudaram**; arquivos e pastas novos entram, apagados saem |
 
 - ~45 MB de índice por milhão de arquivos; uma busca no índice leva ~3 s por milhão.
 - **Apagar índice** limpa tudo; desmarque **Usar** para ignorá-lo numa busca.
-- Fica em `%LOCALAPPDATA%\reperio\` (Windows) ou `~/.local/state/reperio/` (Linux).
+- Fica em `%LOCALAPPDATA%\reperio\` (Windows) ou `~/.local/state/reperio/` (Linux), ou no caminho
+  informado com `--indice <arquivo.sqlite>` (útil para compartilhar um índice na rede).
+- **Modo sem janela (CLI)** para tarefas agendadas e auditoria rápida de disco:
+  ```bash
+  python reperio.py --indexar "\\servidor\dados" --indice "\\servidor\dados\_reperio.sqlite"
+  python reperio.py --espaco "C:\Users\voce" --top 25 --exportar espaco.xlsx
+  ```
 
 ## 🛡️ Confiável em redes lentas e instáveis
 
@@ -283,10 +296,11 @@ python -m unittest discover -s tests -v          # Windows
 xvfb-run -a python3 -m unittest discover -s tests -v   # Linux sem tela
 ```
 
-61 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
+68 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
 vítimas refeitas na hora, cascata entre conexões, pastas grandes que não são travamento, nomes
-inválidos de servidores Samba antigos e exportação com datas corrompidas. O GitHub Actions roda a
-suíte em Windows e Linux, com Python 3.8 e 3.13, a cada push.
+inválidos de servidores Samba antigos, filtros de tamanho/exclusão, análise de espaço por pasta e
+exportação com datas corrompidas. O GitHub Actions roda a suíte em Windows e Linux, com Python 3.8 e
+3.13, a cada push.
 
 ## 📦 Publicar uma versão (mantenedor)
 
@@ -307,15 +321,15 @@ Se o ReperIO ajudou num trabalho, cite-o pelo botão **"Cite this repository"** 
 do [CITATION.cff](CITATION.cff)) ou assim:
 
 > Gambati, J. F. (2026). *ReperIO: busca, índice, exportação e cópia de arquivos em servidores* (versão
-> 2.5.0) [Software]. https://github.com/Yiuky/ReperIO
+> 2.6.0) [Software]. https://github.com/Yiuky/ReperIO
 
 ## 🌐 English Abstract
 
 **ReperIO** (from Latin *reperire*, "to find, to discover", the root of *repertory*) is a portable,
 dependency-free desktop tool for **Windows and Linux** that searches local folders and **network file
-servers** (SMB/CIFS, DFS, mapped drives) for files by name and extension, builds a local **SQLite
-index** for instant repeated searches, **exports** results to Excel (.xlsx), CSV or TXT, and **copies**
-files in parallel.
+servers** (SMB/CIFS, DFS, mapped drives) for files by name, extension and size, analyzes **disk/folder
+space usage**, builds a local **SQLite index** for instant repeated searches, **exports** results to
+Excel (.xlsx), CSV or TXT, and **copies** files in parallel.
 
 It was built for very large, slow and unreliable file servers. On Windows, a single folder that the
 server cannot open stalls the whole SMB connection for minutes; ReperIO opens **several independent

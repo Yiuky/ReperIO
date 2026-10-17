@@ -4,6 +4,42 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versões seguem
 [SemVer](https://semver.org/lang/pt-BR/). Próximos passos ficam no [roadmap](BACKLOG.md).
 
+## [2.6.0] — 2026-10-17
+
+### Adicionado
+- **Análise de espaço por pasta (`Espaço por pasta...` e `--espaco`):**
+  - Nova janela interativa **Espaço por pasta...** que agrega o tamanho recursivo, percentual do pai,
+    quantidade total de arquivos e espaço na própria pasta para todas as subpastas sob a raiz,
+    aproveitando o índice SQLite local (em milissegundos) ou os resultados atuais.
+  - **Navegação drill-down:** duplo clique em qualquer subpasta entra nela para inspecionar os
+    maiores consumidores de espaço nível a nível; botão **⬆ Pasta acima** para subir.
+  - **Mapeamento com pausa e retomada:** botão **Mapear pasta agora** varre pastas ainda não
+    indexadas em segundo plano atualizando os totais em tempo real; clicar em **Parar** pausa na
+    hora e preserva no índice tudo o que já foi lido, continuando de onde parou na próxima vez.
+  - **Exportação do resumo de espaço** para **Excel (.xlsx)**, **CSV** e **TXT**.
+- **Filtro por tamanho (`Tamanho:`):** aceita mínimo (`> 100 MB`, `1,5 GB`), máximo (`< 10 KB`) ou
+  faixa (`10MB..500MB`, `10 MB - 500 MB`). Mesmo com filtro de tamanho ativo, a varredura grava todos
+  os arquivos no índice para não prejudicar buscas futuras nem o cálculo de espaço por pasta.
+- **Exclusão de pastas (`Ignorar pastas:`):** permite pular árvores inteiras por nome ou curinga
+  (ex.: `MOSAICOS, _backup, node_modules, .git, temp_*`), tanto na varredura ao vivo quanto nas
+  consultas ao índice.
+- **Duplo clique em um resultado** abre a pasta de origem no gerenciador de arquivos do sistema já
+  destacando o arquivo (`explorer /select` no Windows, `open -R` no macOS, `xdg-open` no Linux).
+- **Soma de tamanho nos resultados:** o contador mostra o volume total encontrado e o volume
+  selecionado (ex.: `1.240 encontrados (48.20 GB)  |  12 selecionados (3.10 GB)`).
+- **Modo de linha de comando (sem janela) e índice customizável:**
+  - `--indexar <pasta>` indexa em modo headless (ideal para Agendador de Tarefas / `cron`).
+  - `--espaco <pasta>` (com `--top <N>` e `--exportar <arquivo.xlsx|.csv|.txt>`) exibe e exporta os
+    maiores consumidores de espaço direto no terminal.
+  - `--indice <caminho.sqlite>` permite escolher o arquivo de índice (inclusive em pasta de rede).
+  - `--ignorar <pastas>` e `--atualizar` para controlar exclusões e atualização via CLI.
+
+### Corrigido
+- Fechamento explícito de arquivos em `TestExport` (`tests/test_core.py`), eliminando `ResourceWarning`
+  na suíte de testes.
+- 68 testes automatizados (7 novos cobrindo filtros de tamanho, exclusão de pastas, espaço por pasta,
+  exportação de espaço, CLI e diálogo gráfico).
+
 ## [2.5.0] — 2026-10-02
 
 ### Alterado
