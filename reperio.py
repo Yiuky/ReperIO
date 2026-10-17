@@ -1350,7 +1350,7 @@ class SearchThread(threading.Thread):
 
     def __init__(self, root_dir, pattern, extensions, case_sensitive,
                  q, stop_ev, fast_mode=True, index=None, refresh=False, retry_problems=False,
-                 channels=None, min_size=None, max_size=None, exclude_dirs=()):
+                 channels=None, min_size=None, max_size=None, exclude_dirs=(), want_meta=None):
         super(SearchThread, self).__init__(daemon=True)
         self.root_dir = os.path.normpath(root_dir)
         self.pattern = clean_pattern(pattern) or "*"
@@ -1368,7 +1368,10 @@ class SearchThread(threading.Thread):
         self.index = index
         self.verify = index is not None and refresh
         self.n_workers = SCAN_WORKERS if fast_mode else 1
-        self.want_meta = (not fast_mode) or (self.size_match is not None)
+        if want_meta is None:
+            self.want_meta = (not fast_mode) or (self.index is not None) or (self.size_match is not None)
+        else:
+            self.want_meta = bool(want_meta)
         self._lock = threading.Lock()
         # Conexões (descobertas no início da busca, fora da GUI).
         self._given_channels = channels
@@ -3622,7 +3625,7 @@ class SpaceDialog(object):
             sq = queue.Queue(maxsize=2000)
             st = SearchThread(norm, "*", set(), False, sq, stop_ev,
                               fast_mode=True, index=idx, refresh=True,
-                              exclude_dirs=excl)
+                              exclude_dirs=excl, want_meta=True)
             self._scan_thread = st
             st.start()
             mem_rows = [] if idx is None else None
@@ -3938,7 +3941,7 @@ def _run_cli(opts):
             stop = threading.Event()
             st = SearchThread(scan_target, "*", set(), False, q, stop,
                               fast_mode=True, index=index, refresh=True,
-                              exclude_dirs=opts["excludes"])
+                              exclude_dirs=opts["excludes"], want_meta=True)
             st.start()
             count = 0
             while True:
