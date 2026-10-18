@@ -4,6 +4,15 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versões seguem
 [SemVer](https://semver.org/lang/pt-BR/). Próximos passos ficam no [roadmap](BACKLOG.md).
 
+## [Não lançado]
+
+### Adicionado
+- `tools/smoke_exe.py`: teste de fumaça do **executável** pela CLI (31 verificações no Windows, 28 no
+  Linux: `--version`, `--ajuda`, argumentos inválidos, `--manifesto`, indexar, espaço, maiores, extensões,
+  busca, status, treemap HTML, exportações, códigos de saída, nomes com acentos e ideogramas, `--no-index`
+  e, no Windows com `--gui`, abrir e fechar a janela). A Release agora roda esse teste no binário
+  recém-compilado, em Windows e Linux, **antes de publicar**.
+
 ## [2.7.1] — 2026-10-18
 
 ### Corrigido
