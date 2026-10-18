@@ -12,6 +12,9 @@ Todas as mudanças relevantes do projeto. Formato baseado em
   busca, status, treemap HTML, exportações, códigos de saída, nomes com acentos e ideogramas, `--no-index`
   e, no Windows com `--gui`, abrir e fechar a janela). A Release agora roda esse teste no binário
   recém-compilado, em Windows e Linux, **antes de publicar**.
+- `tools/release_notes.py`: o texto da Release sai da seção da versão no CHANGELOG (tabela de download,
+  como abrir, SHA-256 e novidades), no padrão da v2.6.0; as notas automáticas de PRs continuam anexadas.
+  A Release **falha** se a versão não tiver seção no CHANGELOG.
 
 ## [2.7.1] — 2026-10-18
 

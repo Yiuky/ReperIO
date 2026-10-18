@@ -48,15 +48,20 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Somas SHA-256
         run: cd dist && sha256sum *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # Texto da Release = seção da versão no CHANGELOG (falha se ela não existir)
+      - name: Notas da Release (a partir do CHANGELOG)
+        run: python3 tools/release_notes.py "${GITHUB_REF_NAME#v}" > RELEASE_NOTES.md && cat RELEASE_NOTES.md
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/SHA256SUMS.txt
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
