@@ -355,5 +355,82 @@ class TestGuiTreemap(unittest.TestCase):
             shutil.rmtree(base, ignore_errors=True)
 
 
+def _all_widgets(w):
+    yield w
+    for c in w.winfo_children():
+        yield from _all_widgets(c)
+
+
+def hidden_buttons(top):
+    """Botões/opções que, no tamanho atual, estão cortados, fora da janela ou escondidos."""
+    top.update_idletasks()
+    top.update()
+    W, H = top.winfo_width(), top.winfo_height()
+    bad = []
+    for w in _all_widgets(top):
+        if w.winfo_class() not in ("TButton", "TCheckbutton", "TRadiobutton"):
+            continue
+        name = str(w.cget("text"))
+        if not w.winfo_ismapped():
+            if w.winfo_manager():
+                bad.append((name, "não mapeado"))
+            continue
+        right = w.winfo_rootx() + w.winfo_width()
+        bottom = w.winfo_rooty() + w.winfo_height()
+        if (right > top.winfo_rootx() + W + 1 or bottom > top.winfo_rooty() + H + 1
+                or w.winfo_width() < w.winfo_reqwidth() - 2):
+            bad.append((name, "cortado/fora da janela"))
+            continue
+        anc = w.master
+        while anc is not None and anc is not top:       # cortado por um contêiner (painel)
+            if (right > anc.winfo_rootx() + anc.winfo_width() + 1
+                    or bottom > anc.winfo_rooty() + anc.winfo_height() + 1):
+                bad.append((name, "cortado pelo contêiner " + anc.winfo_class()))
+                break
+            anc = anc.master
+    return bad
+
+
+class TestResponsiveLayout(unittest.TestCase):
+    """Nenhum botão pode sumir ao redimensionar: o tamanho mínimo vem do conteúdo."""
+
+    def test_buttons_stay_visible_at_any_size(self):
+        if g.tk is None:
+            self.skipTest("tkinter indisponível")
+        try:
+            root = g.tk.Tk()
+        except g.tk.TclError as e:
+            self.skipTest("sem display: %s" % e)
+        base = tempfile.mkdtemp(prefix="rp_resp_")
+        idx = g.Index(os.path.join(base, "idx.sqlite"))
+        try:
+            app = g.App(root, idx)
+            root.update()
+            mw, mh = root.minsize()
+            self.assertGreaterEqual(mw, 900)
+            for w, h in ((mw, mh), (mw + 120, mh + 60), (1100, 820), (1600, 900), (mw, mh + 200)):
+                root.geometry("%dx%d+0+0" % (w, h))
+                self.assertEqual(hidden_buttons(root), [], "janela principal %dx%d" % (w, h))
+            # pedir menos que o mínimo é barrado pelo minsize: continua tudo visível
+            root.geometry("500x300+0+0")
+            self.assertEqual(hidden_buttons(root), [], "janela principal abaixo do mínimo")
+            app._open_space()
+            dlg = app._space_win.win
+            dlg.update()
+            dw, dh = dlg.minsize()
+            for w, h in ((dw, dh), (dw + 80, dh + 40), (1200, 780), (1600, 900), (dw, 900)):
+                dlg.geometry("%dx%d+0+0" % (w, h))
+                self.assertEqual(hidden_buttons(dlg), [], "janela de espaço %dx%d" % (w, h))
+            dlg.geometry("300x200+0+0")
+            self.assertEqual(hidden_buttons(dlg), [], "janela de espaço abaixo do mínimo")
+            app._space_win._close()
+        finally:
+            idx.close()
+            root.destroy()
+            app = root = None
+            gc.collect()
+            shutil.rmtree(base, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

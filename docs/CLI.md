@@ -117,7 +117,7 @@ de primeiro nível. Serve para achar em segundos "o que está comendo o disco".
 
 - **Na janela (painel interativo, estilo SpaceSniffer):** em **Espaço por pasta...** o treemap fica em um
   painel **acima da tabela**, na mesma janela (a divisória é ajustável; **Ocultar treemap** esconde o
-  painel e **Por: tamanho / quantidade** troca a métrica). Mostra 3 níveis de subpastas aninhadas.
+  painel e **Blocos por: Tamanho / Quantidade** troca a métrica). Mostra 3 níveis de subpastas aninhadas.
   - **Passar o mouse:** destaca o bloco e mostra uma dica com caminho, tamanho, arquivos e participação.
   - **Clique:** seleciona o bloco e marca a linha correspondente da tabela (e vice-versa: escolher uma
     linha da tabela contorna o bloco).

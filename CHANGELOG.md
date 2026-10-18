@@ -4,6 +4,28 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versões seguem
 [SemVer](https://semver.org/lang/pt-BR/). Próximos passos ficam no [roadmap](BACKLOG.md).
 
+## [2.7.1] — 2026-10-18
+
+### Corrigido
+- **Botões que sumiam ao redimensionar:** na janela *Espaço por pasta* os botões da direita ("Abrir no
+  sistema", "Usar como Pasta Raiz", "Ocultar treemap") desapareciam abaixo de ~1220 px de largura, e na
+  janela principal "Apagar índice" ficava cortado no tamanho mínimo. A barra de botões da janela de espaço
+  agora tem **duas linhas** e o **tamanho mínimo das duas janelas é calculado pelo conteúdo** (fonte e
+  escala do sistema), nunca passando da tela.
+- Barras de progresso paradas pareciam "meio cheias": agora só aparecem enquanto trabalham.
+
+### Alterado
+- Janela principal abre mais alta (mais espaço para a lista de resultados); botão renomeado para
+  **Espaço e treemap...**; a métrica do treemap virou **Blocos por: Tamanho / Quantidade**.
+
+### Adicionado
+- Teste automático de layout (`TestResponsiveLayout`): reduz e amplia as duas janelas e confere que nenhum
+  botão fica escondido, cortado ou fora da janela.
+- `tools/screenshots.py`: gera as imagens do README a partir de um acervo **fictício** gravado direto no
+  índice (nada do computador de quem roda aparece).
+- README reescrito com imagens (busca, treemap por tamanho e por quantidade, HTML exportado, tamanho
+  mínimo das janelas, CLI em texto e JSON).
+
 ## [2.7.0] — 2026-10-17
 
 ### Adicionado
