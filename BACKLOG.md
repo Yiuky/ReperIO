@@ -16,6 +16,11 @@ Ideias e próximos passos, em ordem de prioridade. O que já foi entregue está 
 | 5 | P3 | M | Executável para **macOS** nas Releases | Hoje o macOS usa o código-fonte |
 | 6 | P3 | M | Troca de conexão no **Linux** (montagens CIFS alternativas) | Hoje o Linux usa o modo de rodadas no fim |
 | 7 | P3 | — | **Assinatura digital** do executável | Elimina o aviso do SmartScreen e reduz bloqueios de antivírus |
+| 8 | P2 | M | **Tamanho em disco vs. lógico:** gravar o atributo "só na nuvem" (OneDrive) e o espaço alocado | Hoje arquivos só-nuvem contam o tamanho lógico (use `--ignorar OneDrive`); `FIND_DATA` já traz o atributo `RECALL_ON_DATA_ACCESS` |
+| 12 | P2 | M | **Consultas em índices grandes:** `--espaco`/`--maiores`/`--extensoes` levam 7 a 10 s com 869 mil arquivos (benchmark); agregar em SQL (índice em `files(size)`, soma por pasta) em vez de em Python | Respostas de IA em < 1 s |
+| 9 | P3 | P | **Duplicados** (`--duplicados`): agrupar por tamanho + nome e confirmar por hash sob demanda | Complementa `--maiores` na limpeza de disco |
+| 10 | P3 | P | `--json` também para a janela de falhas e para `--status` por raiz | Mais autonomia para agentes |
+| 11 | P3 | M | Treemap: **zoom por clique no HTML** (hoje o HTML é estático e aninhado até `--profundidade`) | Navegar sem voltar à janela |
 
 ## Limitações conhecidas
 

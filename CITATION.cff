@@ -11,7 +11,7 @@ abstract: >-
 authors:
   - family-names: Gambati
     given-names: Joberth Firmino
-version: 2.6.0
+version: 2.7.0
 date-released: 2026-10-17
 license: MIT
 repository-code: "https://github.com/Yiuky/ReperIO"
