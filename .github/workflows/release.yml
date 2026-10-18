@@ -30,6 +30,14 @@ jobs:
         run: xvfb-run -a python -m unittest discover -s tests -v
       - name: Compilar executável
         run: python tools/build.py
+      # O que vai para a Release é o EXECUTÁVEL, não o código-fonte: testa o binário pela CLI
+      # (JSON, códigos de saída, treemap, exportação, acentos) antes de publicar.
+      - name: Teste de fumaça do executável (Windows)
+        if: runner.os == 'Windows'
+        run: python tools/smoke_exe.py dist/ReperIO.exe
+      - name: Teste de fumaça do executável (Linux)
+        if: runner.os == 'Linux'
+        run: python tools/smoke_exe.py dist/ReperIO
       - uses: actions/upload-artifact@v4
         with:
           name: pacote-${{ matrix.os }}

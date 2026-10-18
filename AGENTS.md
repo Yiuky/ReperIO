@@ -81,3 +81,6 @@ Atualize `__version__` (`reperio.py`), o `CHANGELOG.md` e o `CITATION.cff`; depo
 - O ReperIO **só lê**: nenhuma ação da CLI altera arquivos do usuário; só grava o índice e o que
   `--exportar`/`--treemap` pedirem.
 - Desempenho: `python tools/benchmark.py C:\ D:\` regenera `docs/BENCHMARK.md`.
+- Antes de publicar: `python -m unittest discover -s tests` (Windows e Linux) e
+  `python tools/smoke_exe.py <executável>` (a Release roda este último sozinha; `--gui` abre a janela no
+  Windows). Nunca mande `WM_CLOSE`/fechar janelas por título genérico: use o título exato `ReperIO  vX.Y.Z`.
