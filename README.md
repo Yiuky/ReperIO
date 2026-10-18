@@ -474,4 +474,4 @@ considere pagar um café para o desenvolvedor: ajuda a manter o projeto vivo e a
 
 - **Desenvolvedor:** Joberth Firmino Gambati ([@Yiuky](https://github.com/Yiuky))
 - **Licença:** [MIT](LICENSE)
-- Projetos relacionados: [ArcMagery](https://github.com/Yiuky/ArcMagery), imagens de satélite no ArcMap 10.8.
+- Projetos relacionados: [ArcMagery](https://github.com/Yiuky/ArcMagery-releases), imagens de satélite no ArcMap 10.8.
