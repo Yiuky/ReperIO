@@ -4,6 +4,42 @@ Todas as mudanças relevantes do projeto. Formato baseado em
 [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/); versões seguem
 [SemVer](https://semver.org/lang/pt-BR/). Próximos passos ficam no [roadmap](BACKLOG.md).
 
+## [2.7.0] — 2026-10-17
+
+### Adicionado
+- **Treemap por tamanho ou por quantidade de arquivos** (opcional):
+  - Em **Espaço por pasta...**, painel interativo **acima da tabela, na mesma janela** (estilo
+    SpaceSniffer; **Ocultar treemap** e **Por: tamanho/quantidade**). Passar o mouse destaca o bloco e
+    mostra uma dica flutuante; clique seleciona e sincroniza com a tabela (nos dois sentidos); duplo
+    clique ou roda do mouse para cima entra na pasta; roda para baixo, botão direito ou Backspace sobe.
+    Desenha só dados já em memória, sem I/O na interface.
+  - **Exportação para HTML autônomo** (`Exportar... → Treemap`, ou `--treemap ARQ.html`): SVG com
+    dicas, alternância entre as duas métricas, tema claro/escuro e tabela dos maiores itens.
+  - Algoritmo *squarified* (`squarify`, `space_tree`, `treemap_layout`), testado quanto a proporção,
+    limites e sobreposição.
+- **CLI para pessoas, scripts e IAs** (`docs/CLI.md`, `docs/IA.md`):
+  - Novas ações: `--maiores N`, `--extensoes [N]`, `--buscar PADRÃO` (com `--ext`, `--tamanho`,
+    `--ordenar`, `--limite`, `--maiusculas`), `--treemap`, `--status` e `--manifesto`.
+  - **`--json`**: um objeto JSON em ASCII no stdout (mensagens vão para o stderr), com estatísticas da
+    varredura (tempo, arquivos/s, pastas lidas, falhas com o motivo) e do processo (pico de RAM).
+  - **`--so-indice`** (nunca varre o disco), `--em PASTA`, `--profundidade`, `--ignorar` em todas as
+    ações, `--silencioso`, `--sem-indice`, `--ajuda`.
+  - **Códigos de saída fixos** (0 ok, 1 erro, 2 uso, 3 pasta/índice ausente, 130 Ctrl+C).
+  - `--manifesto`: descrição da CLI em JSON (argumentos, campos de saída, códigos, exemplos).
+- `tools/benchmark.py` e `docs/BENCHMARK.md`: varredura a frio, reverificação a quente e consultas,
+  medidas pela própria CLI nos discos reais.
+- Consultas novas no índice: `Index.largest_files`, `Index.extension_summary`, `Index.stats`.
+
+### Corrigido
+- **`--ajuda`/`--help` abria a janela** e argumentos desconhecidos (ou com erro de digitação, como
+  `--espacoo`) também: agora são erro de uso (código 2) e a janela nunca abre por engano.
+- A CLI **descartava em silêncio as pastas que não conseguiu ler** (sem permissão, servidor caiu);
+  agora aparecem em `varredura.falhas` e as pastas sem leitura em `pastas_pendentes`/`completo`.
+- A CLI **caía com `UnicodeEncodeError`** ao imprimir nomes de arquivo fora da codificação do console
+  (cp1252/cp850); agora usa substituição segura.
+- A CLI **sempre saía com código 0**, mesmo com pasta inexistente ou raiz inacessível; agora há códigos
+  de saída distintos (3 = pasta inexistente ou sem dados no índice).
+
 ## [2.6.0] — 2026-10-17
 
 ### Adicionado

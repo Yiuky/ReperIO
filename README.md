@@ -13,7 +13,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.8+"></a>
   <a href="#-requisitos"><img src="https://img.shields.io/badge/Plataforma-Windows%20%7C%20Linux-0078D6.svg" alt="Windows | Linux"></a>
   <a href="#-por-que-sem-dependências"><img src="https://img.shields.io/badge/Depend%C3%AAncias-nenhuma-success.svg" alt="Sem dependências"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.6.0-28A745.svg" alt="Versão v2.6.0"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.7.0-28A745.svg" alt="Versão v2.7.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT"></a>
   <a href="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml"><img src="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml/badge.svg" alt="Testes"></a>
 </p>
@@ -149,11 +149,27 @@ padrão ou filtro de tamanho. Na busca seguinte:
 - **Apagar índice** limpa tudo; desmarque **Usar** para ignorá-lo numa busca.
 - Fica em `%LOCALAPPDATA%\reperio\` (Windows) ou `~/.local/state/reperio/` (Linux), ou no caminho
   informado com `--indice <arquivo.sqlite>` (útil para compartilhar um índice na rede).
-- **Modo sem janela (CLI)** para tarefas agendadas e auditoria rápida de disco:
+- **Modo sem janela (CLI)** para tarefas agendadas, auditoria rápida de disco e **uso por IAs**:
   ```bash
   python reperio.py --indexar "\\servidor\dados" --indice "\\servidor\dados\_reperio.sqlite"
   python reperio.py --espaco "C:\Users\voce" --top 25 --exportar espaco.xlsx
+  python reperio.py --maiores 20 --em D:\ --so-indice          # 20 maiores arquivos, sem tocar o disco
+  python reperio.py --buscar "*.iso" --em D:\ --tamanho "> 1 GB" --json
+  python reperio.py --espaco D:\ --treemap mapa.html            # mapa visual em HTML
   ```
+  `--json` entrega **um objeto JSON** estável no stdout, `--so-indice` garante respostas instantâneas,
+  `--manifesto` descreve a CLI em JSON e os códigos de saída são fixos. Referência em
+  [docs/CLI.md](docs/CLI.md); guia para agentes em [docs/IA.md](docs/IA.md); números medidos em
+  [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+### 🗺️ Treemap interativo
+
+Em **Espaço por pasta...**, um painel de **treemap fica acima da tabela, na mesma janela** (estilo
+SpaceSniffer): a **área dos blocos é proporcional ao tamanho ou à quantidade de arquivos** (botão
+**Por: tamanho / quantidade**; **Ocultar treemap** esconde o painel). Passe o mouse para ver os detalhes,
+clique para selecionar (a tabela acompanha), **roda do mouse** ou duplo clique para entrar numa pasta,
+botão direito para subir. **Exportar... → Treemap
+(página HTML)** ou `--treemap mapa.html` gera uma página autônoma (sem internet, tema claro/escuro).
 
 ## 🛡️ Confiável em redes lentas e instáveis
 
@@ -278,7 +294,9 @@ listagem rápida via `ctypes` (Windows) e Excel escrito com `zipfile`.
 ```
 reperio.py            aplicativo completo, arquivo único (busca, índice, conexões, exportação, interface)
 iniciar.bat / .sh     lançadores: Python da máquina, senão o executável
-tests/                testes automatizados (unittest; cenários de rede simulados)
+tests/                testes automatizados (unittest; cenários de rede simulados, CLI e treemap)
+docs/                 CLI.md, IA.md (uso por agentes) e BENCHMARK.md
+tools/benchmark.py    mede varredura e consultas pela CLI (discos C:/D:)
 tools/build.py        gera o executável (PyInstaller) e o .zip de distribuição
 tools/screenshot.py   gera a imagem do README com dados de demonstração
 tools/make_logo.ps1   gera o logo; tools/make_icon.py monta o ícone .ico
@@ -296,9 +314,9 @@ python -m unittest discover -s tests -v          # Windows
 xvfb-run -a python3 -m unittest discover -s tests -v   # Linux sem tela
 ```
 
-68 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
+95 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
 vítimas refeitas na hora, cascata entre conexões, pastas grandes que não são travamento, nomes
-inválidos de servidores Samba antigos, filtros de tamanho/exclusão, análise de espaço por pasta e
+inválidos de servidores Samba antigos, filtros de tamanho/exclusão, análise de espaço por pasta, treemap, CLI/JSON e
 exportação com datas corrompidas. O GitHub Actions roda a suíte em Windows e Linux, com Python 3.8 e
 3.13, a cada push.
 

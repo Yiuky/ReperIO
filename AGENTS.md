@@ -34,6 +34,8 @@ para `reperio` (`_log_dir`).
 | `SearchThread` | Busca em largura com workers; troca de conexão, vítimas refeitas na hora, quarentena, rodadas no fim |
 | Cópia | `CopyManager`/`CopyWorker`, blocos de 1 MB, cancelável |
 | Exportação | `export_xlsx/csv/txt` (xlsx escrito com `zipfile`) |
+| Treemap | `space_tree()` (árvore a partir de `aggregate_folder_space`), `squarify()`, `treemap_layout()` (retângulos), `render_treemap_html()`; a interface só desenha o que já está em memória (`SpaceDialog._sp`) |
+| CLI | `_build_parser()` (argparse), `_parse_cli()`, `_run_cli()`: JSON em `_CliOut`; códigos de saída em `EXIT_*`; `--manifesto` é gerado a partir do parser |
 | `App` | Interface tkinter |
 
 ## 4. Regras da interface (não quebre)
@@ -68,3 +70,14 @@ Tcl aborta a suíte.
 Atualize `__version__` (`reperio.py`), o `CHANGELOG.md` e o `CITATION.cff`; depois
 `git tag vX.Y.Z && git push origin vX.Y.Z`. A Release é montada pelo GitHub Actions
 (`.github/workflows/release.yml`).
+
+## 8. CLI e uso por IAs (v2.7)
+
+- A CLI é contrato público: **não renomeie** campos do JSON nem mude códigos de saída sem subir a versão
+  e atualizar `docs/CLI.md`, `docs/IA.md` e o `--manifesto`. Campos novos são sempre aditivos.
+- Com `--json`, **nada** além do JSON vai para o stdout (mensagens vão para o stderr) e o JSON é ASCII.
+- Argumento desconhecido é erro de uso (código 2); a janela só abre sem nenhuma ação.
+- Toda ação nova da CLI precisa de teste em `tests/test_cli_treemap.py` (`run_cli` captura saída e código).
+- O ReperIO **só lê**: nenhuma ação da CLI altera arquivos do usuário; só grava o índice e o que
+  `--exportar`/`--treemap` pedirem.
+- Desempenho: `python tools/benchmark.py C:\ D:\` regenera `docs/BENCHMARK.md`.

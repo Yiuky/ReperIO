@@ -18,8 +18,12 @@ REGRAS ANTI-FREEZE da interface:
   3. Toda comunicação thread -> GUI via queue.Queue + root.after (polling).
   4. Treeview limpo com um único comando Tcl; contadores mantidos em Python.
 """
+import argparse
+import colorsys
 import errno
 import fnmatch
+import heapq
+import json
 import os
 import platform
 import queue
@@ -32,7 +36,7 @@ import threading
 import time
 import traceback
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 APP_NAME = "ReperIO"
 APP_TAGLINE = "busca, índice, exportação e cópia de arquivos em servidores"
 APP_URL = "https://github.com/Yiuky/ReperIO"
@@ -979,6 +983,77 @@ class Index(object):
         finally:
             c.close()
 
+    def _excl_function(self, c, root, exclude_dirs):
+        """Registra `gff_excl(caminho)` na conexão: 1 = pasta ignorada pelos filtros."""
+        excluder = make_dir_excluder(exclude_dirs, root) if exclude_dirs else None
+        cache = {}
+
+        def excl(dpath):
+            if excluder is None:
+                return 0
+            r = cache.get(dpath)
+            if r is None:
+                r = cache[dpath] = 1 if excluder(db_dec(dpath)) else 0
+            return r
+        c.create_function("gff_excl", 1, excl)
+
+    def largest_files(self, root, n=20, exclude_dirs=()):
+        """Os `n` maiores arquivos indexados sob `root`: [(caminho, tamanho, mtime)]."""
+        self.flush()
+        c = self.connect()
+        try:
+            self._excl_function(c, root, exclude_dirs)
+            args = tuple(db_enc(a) for a in _under_args(root))
+            cur = c.execute(
+                "SELECT d.path, f.name, f.size, f.mtime FROM files f JOIN dirs d ON d.id = f.dir_id "
+                "WHERE %s AND d.state = 1 AND f.size > 0 AND gff_excl(d.path) = 0 "
+                "ORDER BY f.size DESC LIMIT ?" % _UNDER, args + (max(1, int(n)),))
+            return [(os.path.join(db_dec(dp), db_dec(nm)), sz, mt) for dp, nm, sz, mt in cur]
+        finally:
+            c.close()
+
+    def extension_summary(self, root, top=20, exclude_dirs=()):
+        """Espaço por extensão sob `root`: [(extensão, arquivos, bytes)], do maior para o menor."""
+        self.flush()
+        c = self.connect()
+        try:
+            self._excl_function(c, root, exclude_dirs)
+            c.create_function("gff_ext", 1,
+                              lambda n: os.path.splitext(db_dec(n))[1].lower() or "(sem extensão)")
+            args = tuple(db_enc(a) for a in _under_args(root))
+            cur = c.execute(
+                "SELECT gff_ext(f.name) AS e, count(*), "
+                "COALESCE(sum(CASE WHEN f.size > 0 THEN f.size ELSE 0 END), 0) AS s "
+                "FROM files f JOIN dirs d ON d.id = f.dir_id "
+                "WHERE %s AND d.state = 1 AND gff_excl(d.path) = 0 "
+                "GROUP BY e ORDER BY s DESC LIMIT ?" % _UNDER, args + (max(1, int(top)),))
+            return [(e, n, s) for e, n, s in cur]
+        finally:
+            c.close()
+
+    def stats(self):
+        """Resumo do próprio índice (para `--status`)."""
+        self.flush()
+        c = self.connect()
+        try:
+            n_done, n_pend, oldest, newest = c.execute(
+                "SELECT sum(state = 1), sum(state = 0), min(scanned), max(scanned) FROM dirs").fetchone()
+            n_files, n_bytes = c.execute(
+                "SELECT count(*), COALESCE(sum(CASE WHEN size > 0 THEN size ELSE 0 END), 0) "
+                "FROM files").fetchone()
+            n_prob = c.execute("SELECT count(*) FROM problems").fetchone()[0]
+            roots = [db_dec(r[0]) for r in c.execute(
+                "SELECT path FROM dirs WHERE parent IS NULL AND state = 1 ORDER BY path")]
+            try:
+                disk = os.path.getsize(self.path)
+            except OSError:
+                disk = 0
+            return {"path": self.path, "dirs": n_done or 0, "pending_dirs": n_pend or 0,
+                    "files": n_files, "bytes": n_bytes, "problems": n_prob, "roots": roots,
+                    "oldest": oldest, "newest": newest, "disk_bytes": disk}
+        finally:
+            c.close()
+
 def aggregate_folder_space(dir_stats, root, pending_dirs=0):
     """
     Agrega o consumo de espaço de toda a árvore sob `root` em uma única passada.
@@ -1126,6 +1201,306 @@ def summarize_rows_space(rows, root, exclude_dirs=()):
             prev[1] += sz
     stats = [(dp, cnt, tot) for dp, (cnt, tot) in by_dir.items()]
     return aggregate_folder_space(stats, root, pending_dirs=0)
+
+# ===========================================================================
+# Treemap: mapa de blocos proporcional ao tamanho ou à quantidade de arquivos
+# ===========================================================================
+# Reaproveita a agregação de `aggregate_folder_space` (já em memória): não faz
+# nenhum I/O. O desenho (Tk ou HTML) só consome a lista de retângulos de
+# `treemap_layout`. Algoritmo "squarified" (Bruls, Huizing e van Wijk, 1999):
+# blocos o mais próximo possível de quadrados, fáceis de comparar a olho.
+TREEMAP_METRICS = ("tamanho", "quantidade")
+
+def treemap_key(metric):
+    """'tamanho'/'size' -> 'size'; 'quantidade'/'files' -> 'files'."""
+    return "files" if str(metric).lower() in ("quantidade", "files", "arquivos") else "size"
+
+def space_tree(space_info, folder_path=None, depth=2, max_children=40):
+    """
+    Árvore aninhada para o treemap a partir de `aggregate_folder_space`:
+    {"name", "path", "size", "files", "dirs", "kind", "children"}, com `kind` em
+    "dir" | "files" (arquivos soltos na pasta) | "others" (itens pequenos agrupados).
+    `depth` = níveis de subpastas abertos; cada pasta mantém no máximo
+    `max_children` filhos por tamanho e por quantidade, e o resto vira "[outros]".
+    """
+    nodes = space_info.get("nodes") or {}
+    key = path_key(folder_path) if folder_path else space_info.get("root_key")
+    if key not in nodes:
+        return None
+
+    def build(k, d):
+        n = nodes[k]
+        t = {"name": n["name"], "path": n["path"], "size": n["total_size"],
+             "files": n["total_files"], "dirs": len(n["children"]),
+             "kind": "dir", "children": []}
+        if d <= 0:
+            return t
+        kids = [build(c, d - 1) for c in n["children"]]
+        if n["direct_files"] > 0:
+            kids.append({"name": "[arquivos desta pasta]", "path": n["path"],
+                         "size": n["direct_size"], "files": n["direct_files"],
+                         "dirs": 0, "kind": "files", "children": []})
+        if len(kids) > max_children:
+            keep = {id(x) for x in sorted(kids, key=lambda x: x["size"], reverse=True)[:max_children]}
+            keep |= {id(x) for x in sorted(kids, key=lambda x: x["files"], reverse=True)[:max_children]}
+            rest = [x for x in kids if id(x) not in keep]
+            kids = [x for x in kids if id(x) in keep]
+            if rest:
+                kids.append({"name": "[outros %s itens]" % fmt_n(len(rest)), "path": n["path"],
+                             "size": sum(x["size"] for x in rest),
+                             "files": sum(x["files"] for x in rest),
+                             "dirs": 0, "kind": "others", "children": []})
+        t["children"] = kids
+        return t
+    return build(key, max(0, int(depth)))
+
+def _worst_ratio(row, side):
+    s = sum(row)
+    return max(side * side * max(row) / (s * s), (s * s) / (side * side * min(row)))
+
+def squarify(values, x, y, w, h):
+    """
+    Divide o retângulo (x, y, w, h) em blocos de área proporcional a `values`
+    (ordem decrescente, todos > 0). Devolve [(x, y, w, h)] na mesma ordem.
+    """
+    n = len(values)
+    total = float(sum(values))
+    if n == 0 or total <= 0 or w <= 0 or h <= 0:
+        return [(x, y, 0.0, 0.0)] * n
+    scale = w * h / total
+    areas = [v * scale for v in values]
+    rects = [None] * n
+    i = 0
+    while i < n:
+        side = min(w, h)
+        row = [areas[i]]
+        j = i + 1
+        while j < n and _worst_ratio(row + [areas[j]], side) <= _worst_ratio(row, side):
+            row.append(areas[j])
+            j += 1
+        s = sum(row)
+        if w >= h:                      # coluna à esquerda
+            cw = s / h
+            cy = y
+            for k, a in enumerate(row):
+                ch = a / cw if cw > 0 else 0.0
+                rects[i + k] = (x, cy, cw, ch)
+                cy += ch
+            x += cw
+            w -= cw
+        else:                           # linha em cima
+            rh = s / w
+            cx = x
+            for k, a in enumerate(row):
+                cw2 = a / rh if rh > 0 else 0.0
+                rects[i + k] = (cx, y, cw2, rh)
+                cx += cw2
+            y += rh
+            h -= rh
+        i = j
+    return rects
+
+def treemap_layout(tree, metric, width, height, header=16, pad=2, min_px=3):
+    """
+    Posiciona `tree` (de `space_tree`) em `width` x `height` pixels. `metric`:
+    "tamanho" ou "quantidade". Devolve retângulos em ordem de desenho (a pasta
+    antes de seus filhos): {"x", "y", "w", "h", "depth", "hue", "node", "leaf"}.
+    `header` reserva uma faixa para o nome da pasta; blocos menores que
+    `min_px` em qualquer lado não são desenhados.
+    """
+    key = treemap_key(metric)
+    out = []
+
+    def place(t, x, y, w, h, depth, hue):
+        r = {"x": x, "y": y, "w": w, "h": h, "depth": depth, "hue": hue,
+             "node": t, "leaf": True}
+        out.append(r)
+        kids = [c for c in t["children"] if c[key] > 0]
+        if not kids or w < 24 or h < 18:
+            return
+        top = header if (h >= header * 2.2 and w >= 50) else 0
+        ix, iy = x + pad, y + pad + top
+        iw, ih = w - 2 * pad, h - 2 * pad - top
+        if iw <= min_px or ih <= min_px:
+            return
+        kids.sort(key=lambda c: c[key], reverse=True)
+        for i, (c, (cx, cy, cw, ch)) in enumerate(
+                zip(kids, squarify([c[key] for c in kids], ix, iy, iw, ih))):
+            if cw < min_px or ch < min_px:
+                continue
+            r["leaf"] = False
+            place(c, cx, cy, cw, ch, depth + 1,
+                  (i * 0.61803398875) % 1.0 if depth == 0 else hue)
+    place(tree, 0.0, 0.0, float(width), float(height), 0, 0.0)
+    return out
+
+def treemap_rgb(hue, depth, kind="dir"):
+    """Cor (r, g, b) de um bloco: matiz por pasta de 1º nível, mais claro a cada nível."""
+    if kind == "others":
+        return (92, 96, 104)
+    if kind == "files":
+        s, v = 0.12, 0.55 + 0.04 * min(depth, 4)
+    else:
+        s = max(0.25, 0.62 - 0.08 * depth)
+        v = min(0.92, 0.50 + 0.09 * depth)
+    r, g, b = colorsys.hsv_to_rgb(hue, s, v)
+    return int(r * 255), int(g * 255), int(b * 255)
+
+def _text_on(rgb):
+    return "#101418" if (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) > 150 else "#ffffff"
+
+def treemap_tip(node, root_total, root_files, metric):
+    """Texto de dica de um bloco (tooltip do HTML e barra de status do Tk)."""
+    base = root_files if treemap_key(metric) == "files" else root_total
+    val = node["files"] if treemap_key(metric) == "files" else node["size"]
+    pct = (val * 100.0 / base) if base > 0 else 0.0
+    return "%s — %s · %s arquivo(s) · %.1f%% do total (%s)" % (
+        node["name"], fsize(node["size"]), fmt_n(node["files"]), pct,
+        "por quantidade" if treemap_key(metric) == "files" else "por tamanho")
+
+def _svg_label(text, w, size=11):
+    cap = int((w - 8) / (size * 0.58))
+    if cap < 3:
+        return ""
+    return text if len(text) <= cap else text[:cap - 1] + "…"
+
+def render_treemap_svg(tree, metric, width=1200, height=720, header=16):
+    """SVG do treemap (dicas nativas via <title>, sem JavaScript)."""
+    key = treemap_key(metric)
+    rects = treemap_layout(tree, metric, width, height, header=header)
+    root_val = tree[key] or 1
+    parts = ['<svg viewBox="0 0 %d %d" xmlns="http://www.w3.org/2000/svg" '
+             'font-family="Segoe UI, system-ui, sans-serif" font-size="11" role="img">'
+             % (width, height)]
+    for r in rects:
+        if r["depth"] == 0:
+            continue
+        t = r["node"]
+        rgb = treemap_rgb(r["hue"], r["depth"], t["kind"])
+        ink = _text_on(rgb)
+        x, y, w, h = r["x"], r["y"], r["w"], r["h"]
+        tip = "%s\n%s" % (t["path"], treemap_tip(t, tree["size"], tree["files"], metric))
+        parts.append('<g><title>%s</title><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
+                     'fill="rgb(%d,%d,%d)" stroke="#0d1117" stroke-opacity=".45"/>'
+                     % (_xml(tip), x, y, w, h, rgb[0], rgb[1], rgb[2]))
+        if r["leaf"] and w >= 56 and h >= 30:
+            parts.append('<text x="%.1f" y="%.1f" fill="%s">%s</text>'
+                         '<text x="%.1f" y="%.1f" fill="%s" fill-opacity=".8">%s</text>'
+                         % (x + 5, y + 15, ink, _xml(_svg_label(t["name"], w)),
+                            x + 5, y + 29, ink, _xml(_svg_label(
+                                fsize(t["size"]) if key == "size" else "%s arq." % fmt_n(t["files"]), w))))
+        elif not r["leaf"] and w >= 56 and h >= header * 2.2:
+            parts.append('<text x="%.1f" y="%.1f" fill="%s" font-weight="600">%s</text>'
+                         % (x + 5, y + 12, ink, _xml(_svg_label(
+                             "%s · %s" % (t["name"], fsize(t["size"]) if key == "size"
+                                          else "%s arq." % fmt_n(t["files"])), w))))
+        parts.append("</g>")
+    parts.append("</svg>")
+    return "".join(parts)
+
+_TREEMAP_HTML = """<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@@TITLE@@</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#1c2128;--mut:#5b6573;--card:#fff;--line:#d8dde4;--acc:#2f6fdd}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#8b949e;--card:#161b22;--line:#30363d;--acc:#58a6ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:1280px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--mut);margin:0 0 14px;word-break:break-all}
+.kpis{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 14px}
+.kpi b{display:block;font-size:19px}
+.kpi span{color:var(--mut);font-size:12px}
+.bar{display:flex;gap:16px;align-items:center;margin:6px 0 10px;flex-wrap:wrap}
+.bar label{cursor:pointer}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;overflow:hidden}
+svg{display:block;width:100%;height:auto}
+table{width:100%;border-collapse:collapse;margin-top:14px}
+th,td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+th:first-child,td:first-child{text-align:left;word-break:break-all}
+th{color:var(--mut);font-weight:600;font-size:12px}
+.bg{display:inline-block;height:8px;background:var(--acc);border-radius:2px;vertical-align:middle}
+footer{color:var(--mut);font-size:12px;margin-top:16px}
+</style>
+</head>
+<body>
+<main>
+<h1>@@TITLE@@</h1>
+<p class="sub">@@ROOT@@</p>
+<div class="kpis">
+<div class="kpi"><b>@@TOTAL@@</b><span>espaço ocupado</span></div>
+<div class="kpi"><b>@@FILES@@</b><span>arquivos</span></div>
+<div class="kpi"><b>@@DIRS@@</b><span>pastas lidas@@PENDING@@</span></div>
+</div>
+<div class="bar">
+<strong>Dimensionar blocos por:</strong>
+<label><input type="radio" name="m" value="tamanho"@@CHK_SIZE@@> tamanho</label>
+<label><input type="radio" name="m" value="quantidade"@@CHK_FILES@@> quantidade de arquivos</label>
+<span style="color:var(--mut)">Passe o mouse sobre um bloco para ver caminho, tamanho e participação.</span>
+</div>
+<div class="card" id="tamanho"@@HID_SIZE@@>@@SVG_SIZE@@</div>
+<div class="card" id="quantidade"@@HID_FILES@@>@@SVG_FILES@@</div>
+<table>
+<thead><tr><th>Maiores itens</th><th>Tamanho</th><th>% do total</th><th>Arquivos</th></tr></thead>
+<tbody>@@ROWS@@</tbody>
+</table>
+<footer>Gerado pelo ReperIO @@VERSION@@ em @@WHEN@@. Arquivo único, sem dependências externas.</footer>
+</main>
+<script>
+document.querySelectorAll('input[name=m]').forEach(function(r){r.addEventListener('change',function(){
+document.getElementById('tamanho').hidden=this.value!=='tamanho';
+document.getElementById('quantidade').hidden=this.value!=='quantidade';});});
+</script>
+</body>
+</html>
+"""
+
+def render_treemap_html(space_info, folder_path=None, depth=3, title=None, top=25, primary="tamanho"):
+    """Página HTML autônoma com o treemap (por tamanho e por quantidade) e a tabela dos maiores."""
+    tree = space_tree(space_info, folder_path, depth=depth)
+    if tree is None:
+        raise ValueError("pasta não encontrada nos dados de espaço: %s" % folder_path)
+    items = folder_space_children(space_info, tree["path"])[:top]
+    rows = []
+    for it in items:
+        pct = it["pct_root"] if tree["path"] == space_info["root"] else it["pct"]
+        rows.append('<tr><td>%s</td><td>%s</td><td>%.1f%% <span class="bg" style="width:%dpx"></span></td>'
+                    '<td>%s</td></tr>' % (_xml(it["name"]),
+                                          _xml(fsize(it["total_size"])), pct,
+                                          max(1, int(pct * 0.8)), fmt_n(it["total_files"])))
+    pend = space_info.get("pending_dirs") or 0
+    by_files = treemap_key(primary) == "files"
+    repl = {
+        "TITLE": _xml(title or "Treemap de espaço — %s" % tree["name"]),
+        "ROOT": _xml(tree["path"]),
+        "TOTAL": _xml(fsize(tree["size"])),
+        "FILES": _xml(fmt_n(tree["files"])),
+        "DIRS": _xml(fmt_n(space_info.get("scanned_dirs", 0))),
+        "PENDING": _xml(" (+%s ainda sem leitura)" % fmt_n(pend)) if pend else "",
+        "SVG_SIZE": render_treemap_svg(tree, "tamanho"),
+        "SVG_FILES": render_treemap_svg(tree, "quantidade"),
+        "ROWS": "".join(rows),
+        "CHK_SIZE": "" if by_files else " checked", "CHK_FILES": " checked" if by_files else "",
+        "HID_SIZE": " hidden" if by_files else "", "HID_FILES": "" if by_files else " hidden",
+        "VERSION": "v" + __version__,
+        "WHEN": _xml(time.strftime("%d/%m/%Y %H:%M")),
+    }
+    html = _TREEMAP_HTML
+    for k, v in repl.items():
+        html = html.replace("@@%s@@" % k, v)
+    return html
+
+def export_treemap_html(space_info, dest, folder_path=None, depth=3, title=None, primary="tamanho"):
+    """Grava o treemap em `dest` (.html, UTF-8). Devolve o número de blocos de 1º nível."""
+    html = render_treemap_html(space_info, folder_path, depth=depth, title=title, primary=primary)
+    with open(dest, "w", encoding="utf-8", newline="\n") as f:
+        f.write(html)
+    return len(folder_space_children(space_info, folder_path))
 
 # ===========================================================================
 # Canais: várias conexões SMB independentes com o mesmo servidor
@@ -2665,8 +3040,8 @@ class App(object):
             self.root.iconphoto(True, self._icon)
         except tk.TclError:
             pass   # Tk sem suporte a PNG (muito antigo): fica o ícone padrão
-        self.root.geometry("1100x700")
-        self.root.minsize(900, 560)
+        self.root.geometry("1100x820")
+        self.root.minsize(900, 620)
         self.root.configure(bg=self.BG)
 
     def _fonts(self):
@@ -2813,6 +3188,7 @@ class App(object):
         self.prog_s = ttk.Progressbar(f, mode="indeterminate", length=120,
                                       style="Accent.Horizontal.TProgressbar")
         self.prog_s.pack(side="left", padx=(12, 0))
+        self.prog_s.pack_forget()
         self.root.bind("<Return>", lambda _e: self._start())
         e_root.focus_set()
 
@@ -2826,7 +3202,7 @@ class App(object):
         self.lbl_cnt.pack(side="left", padx=(8, 0), pady=5)
         self.b_export = ttk.Button(tb, text="Exportar...", style="Primary.TButton", command=self._export)
         self.b_export.pack(side="right", padx=(3, 8), pady=5)
-        self.b_space = ttk.Button(tb, text="Espaço por pasta...", style="Secondary.TButton",
+        self.b_space = ttk.Button(tb, text="Espaço e treemap...", style="Secondary.TButton",
                                   command=self._open_space)
         self.b_space.pack(side="right", padx=3, pady=5)
         for t, c in [("Inverter", self._invert),
@@ -2977,6 +3353,7 @@ class App(object):
             self._stop_s.set()
         self._running = True
         self.b_stop.config(state="normal")
+        self.prog_s.pack(side="left", padx=(12, 0))
         self.prog_s.start(12)
         self._st("Iniciando busca...", self.WARN)
         params = {
@@ -3155,6 +3532,7 @@ class App(object):
         self.b_start.config(state="normal")
         self.b_stop.config(state="disabled")
         self.prog_s.stop()
+        self.prog_s.pack_forget()
         extra = ""
         if self._sthread is not None and self._sthread.summary:
             extra = "  — origem: " + self._sthread.summary
@@ -3450,8 +3828,8 @@ class SpaceDialog(object):
         self.app = app
         self.win = tk.Toplevel(app.root)
         self.win.title("Espaço por pasta — %s" % APP_NAME)
-        self.win.geometry("980x580")
-        self.win.minsize(780, 420)
+        self.win.geometry("1260x760")
+        self.win.minsize(900, 480)
         self.win.configure(bg=app.BG)
         self._closed = False
         self._q = queue.Queue()
@@ -3464,6 +3842,14 @@ class SpaceDialog(object):
         self._root_total = {"total_size": 0, "total_files": 0}
         self._scol = "size"
         self._srev = True
+        self._sp = None          # agregação completa (nodes) da última consulta, para o treemap
+        self._tm_on = True       # painel do treemap visível junto da tabela
+        self._tm_metric = "tamanho"
+        self._tm_rects = []
+        self._tm_sel_key = None  # (caminho, tipo) do bloco selecionado
+        self._tm_hover_key = None
+        self._tm_after = None
+        self._tm_last_zoom = 0.0
         self._build(initial_dir)
         self.win.protocol("WM_DELETE_WINDOW", self._close)
         self._poll()
@@ -3502,10 +3888,21 @@ class SpaceDialog(object):
         self.prog = ttk.Progressbar(bf, mode="indeterminate", length=110,
                                     style="Accent.Horizontal.TProgressbar")
         self.prog.pack(side="left", padx=(8, 8))
+        self.prog.pack_forget()
 
         self.b_export = ttk.Button(bf, text="Exportar...", style="Primary.TButton",
                                    command=self._export)
         self.b_export.pack(side="right", padx=(4, 0))
+        self.f_metric = ttk.Frame(bf, style="Panel.TFrame")
+        self.f_metric.pack(side="right", padx=(4, 8))
+        ttk.Label(self.f_metric, text="Blocos por:", style="Panel.TLabel").pack(side="left", padx=(0, 4))
+        self.v_metric = tk.StringVar(value="tamanho")
+        for txt, val in (("Tamanho", "tamanho"), ("Quantidade", "quantidade")):
+            ttk.Radiobutton(self.f_metric, text=txt, value=val, variable=self.v_metric,
+                            style="Dark.TRadiobutton", command=self._set_metric).pack(side="left", padx=2)
+        self.b_tm = ttk.Button(bf, text="Ocultar treemap", style="Secondary.TButton",
+                               command=self._toggle_treemap)
+        self.b_tm.pack(side="right", padx=4)
         ttk.Button(bf, text="Abrir no sistema", style="Secondary.TButton",
                    command=self._open_selected).pack(side="right", padx=4)
         ttk.Button(bf, text="Usar como Pasta Raiz", style="Secondary.TButton",
@@ -3519,11 +3916,28 @@ class SpaceDialog(object):
             sf, text="  Informe uma pasta para ver o espaço ocupado por cada subpasta.",
             style="Counter.TLabel")
         self.lbl_sum.pack(side="left", padx=8, pady=5)
-        ttk.Label(sf, text="Duplo clique em uma subpasta para entrar nela  ",
+        ttk.Label(sf, text="Cor = pasta de 1º nível · cinza = arquivos soltos · roda do mouse entra/sobe · botão direito sobe  ",
                   style="Sub.TLabel").pack(side="right", padx=8, pady=5)
 
-        tf = ttk.Frame(self.win, style="Dark.TFrame")
-        tf.pack(fill="both", expand=True, padx=4, pady=4)
+        self.pw = ttk.PanedWindow(self.win, orient="vertical")
+        self.pw.pack(fill="both", expand=True, padx=4, pady=4)
+        self._tm_frame = ttk.Frame(self.pw, style="Dark.TFrame")
+        self.canvas = tk.Canvas(self._tm_frame, bg=a.BG, highlightthickness=0, cursor="hand2",
+                                takefocus=True)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda _e: self._tm_schedule())
+        self.canvas.bind("<Motion>", self._tm_motion)
+        self.canvas.bind("<Leave>", self._tm_leave)
+        self.canvas.bind("<Button-1>", self._tm_click)
+        self.canvas.bind("<Double-1>", self._tm_double)
+        self.canvas.bind("<Button-3>", lambda _e: self.go_up())
+        self.canvas.bind("<BackSpace>", lambda _e: self.go_up())
+        self.canvas.bind("<MouseWheel>", lambda e: self._tm_zoom(e, 1 if e.delta > 0 else -1))
+        self.canvas.bind("<Button-4>", lambda e: self._tm_zoom(e, 1))
+        self.canvas.bind("<Button-5>", lambda e: self._tm_zoom(e, -1))
+        self.pw.add(self._tm_frame, weight=3)
+        tf = ttk.Frame(self.pw, style="Dark.TFrame")
+        self.pw.add(tf, weight=2)
         tf.rowconfigure(0, weight=1)
         tf.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(tf, columns=self.COLS, show="headings",
@@ -3544,6 +3958,8 @@ class SpaceDialog(object):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self._tf = tf
 
         self.lbl_st = ttk.Label(self.win, text="  Pronto.", style="Status.TLabel")
         self.lbl_st.pack(fill="x", side="bottom", padx=4, pady=3)
@@ -3614,6 +4030,7 @@ class SpaceDialog(object):
         self._scan_stop = threading.Event()
         self.b_scan.config(state="disabled")
         self.b_stop.config(state="normal")
+        self.prog.pack(side="left", padx=(8, 8), after=self.b_stop)
         self.prog.start(12)
         self.lbl_st.config(text="  Mapeando %s..." % norm, foreground=self.app.WARN)
         idx = self.app._index
@@ -3672,7 +4089,201 @@ class SpaceDialog(object):
         self.lbl_st.config(text="  Parando mapeamento (o que já foi lido fica salvo no índice)...",
                            foreground=self.app.WARN)
 
+    # -- Treemap (painel interativo, estilo SpaceSniffer) --------------------
+    # Só desenha dados que já estão em memória (`self._sp`): nenhum I/O na GUI.
+    #   passar o mouse .. destaca o bloco e mostra uma dica flutuante
+    #   clique ........... seleciona (e marca a linha da tabela, e vice-versa)
+    #   duplo clique ..... entra na pasta; roda do mouse para cima = entra, para baixo = sobe
+    #   botão direito .... sobe um nível
+    def _toggle_treemap(self):
+        self._tm_on = not self._tm_on
+        if self._tm_on:
+            self.pw.insert(0, self._tm_frame, weight=3)
+            self.b_tm.config(text="Ocultar treemap")
+            self.f_metric.pack(side="right", padx=(4, 8))
+            self._tm_schedule()
+        else:
+            self.pw.forget(self._tm_frame)
+            self.b_tm.config(text="Mostrar treemap")
+            self.f_metric.pack_forget()
+
+    def _set_metric(self):
+        self._tm_metric = self.v_metric.get()
+        self._tm_redraw()
+
+    def _cycle_metric(self):
+        self.v_metric.set("quantidade" if self._tm_metric == "tamanho" else "tamanho")
+        self._set_metric()
+
+    def _tm_schedule(self):
+        if self._tm_after is not None:
+            try:
+                self.win.after_cancel(self._tm_after)
+            except tk.TclError:
+                pass
+        self._tm_after = self.win.after(80, self._tm_redraw)
+
+    @staticmethod
+    def _tm_hex(rgb):
+        return "#%02x%02x%02x" % rgb
+
+    @staticmethod
+    def _tm_key(r):
+        return (r["node"]["path"], r["node"]["kind"])
+
+    def _tm_find(self, key):
+        if key is None:
+            return None
+        for r in self._tm_rects:
+            if r["depth"] and self._tm_key(r) == key:
+                return r
+        return None
+
+    def _tm_redraw(self):
+        self._tm_after = None
+        if self._closed or not self._tm_on:
+            return
+        c = self.canvas
+        c.delete("all")
+        self._tm_rects = []
+        sp = self._sp
+        w, h = c.winfo_width(), c.winfo_height()
+        tree = space_tree(sp, self._cur_dir, depth=3) if (sp and sp.get("nodes") and self._cur_dir) else None
+        if tree is None or w < 40 or h < 40 or (tree["size"] <= 0 and tree["files"] <= 0):
+            c.create_text(w // 2, h // 2, fill=self.app.WARN, font=("Segoe UI", 11),
+                          text="Sem dados para o treemap: consulte o índice ou mapeie a pasta.")
+            return
+        rects = treemap_layout(tree, self._tm_metric, w - 2, h - 2)
+        self._tm_rects = rects
+        by_files = treemap_key(self._tm_metric) == "files"
+        for r in rects:
+            if r["depth"] == 0:
+                continue
+            t = r["node"]
+            rgb = treemap_rgb(r["hue"], r["depth"], t["kind"])
+            x, y, rw, rh = r["x"] + 1, r["y"] + 1, r["w"], r["h"]
+            c.create_rectangle(x, y, x + rw, y + rh, fill=self._tm_hex(rgb),
+                               outline="#0d1117", width=1)
+            ink = _text_on(rgb)
+            val = ("%s arq." % fmt_n(t["files"])) if by_files else fsize(t["size"])
+            if r["leaf"] and rw >= 56 and rh >= 32:
+                c.create_text(x + 5, y + 4, anchor="nw", fill=ink, font=("Segoe UI", 9),
+                              text="%s\n%s" % (_svg_label(t["name"], rw, 9), _svg_label(val, rw, 9)))
+            elif not r["leaf"] and rw >= 56 and rh >= 35:
+                c.create_text(x + 5, y + 2, anchor="nw", fill=ink, font=("Segoe UI", 9, "bold"),
+                              text=_svg_label("%s · %s" % (t["name"], val), rw, 9))
+        self._tm_overlay()
+        self.lbl_st.config(text="  Treemap por %s de %s — passe o mouse, clique, role a roda para entrar/subir."
+                           % (self._tm_metric, self._cur_dir), foreground=self.app.OK)
+
+    def _tm_overlay(self):
+        """Contornos de seleção e de passagem do mouse, sempre por cima dos blocos."""
+        c = self.canvas
+        c.delete("ov")
+        for key, color, width in ((self._tm_hover_key, "#ffd54a", 2), (self._tm_sel_key, "#ffffff", 3)):
+            r = self._tm_find(key)
+            if r is not None:
+                c.create_rectangle(r["x"] + 1, r["y"] + 1, r["x"] + 1 + r["w"], r["y"] + 1 + r["h"],
+                                   outline=color, width=width, tags="ov")
+
+    def _tm_hit(self, x, y):
+        for r in reversed(self._tm_rects):          # o último desenhado é o mais profundo
+            if r["depth"] and r["x"] + 1 <= x <= r["x"] + 1 + r["w"] and r["y"] + 1 <= y <= r["y"] + 1 + r["h"]:
+                return r
+        return None
+
+    def _tm_tip(self, r):
+        sp = self._sp
+        return treemap_tip(r["node"], sp["total_size"], sp["total_files"], self._tm_metric)
+
+    def _tm_show_tip(self, event, r):
+        c = self.canvas
+        c.delete("tip")
+        node = r["node"]
+        txt = "%s\n%s" % (node["path"] if node["kind"] == "dir" else "%s  (%s)" % (node["name"], node["path"]),
+                          self._tm_tip(r).split(" — ", 1)[1])
+        t = c.create_text(0, 0, text=txt, anchor="nw", fill="#e6edf3", font=("Segoe UI", 9), tags="tip")
+        x0, y0, x1, y1 = c.bbox(t)
+        wd, ht = x1 - x0 + 12, y1 - y0 + 8
+        x = min(event.x + 16, max(0, c.winfo_width() - wd - 2))
+        y = min(event.y + 18, max(0, c.winfo_height() - ht - 2))
+        c.coords(t, x + 6, y + 4)
+        bg = c.create_rectangle(x, y, x + wd, y + ht, fill="#1f2630", outline="#8b949e", tags="tip")
+        c.tag_lower(bg, t)
+        c.tag_raise("tip")
+
+    def _tm_motion(self, event):
+        r = self._tm_hit(event.x, event.y)
+        key = self._tm_key(r) if r is not None else None
+        if key != self._tm_hover_key:
+            self._tm_hover_key = key
+            self._tm_overlay()
+        if r is None:
+            self.canvas.delete("tip")
+            return
+        self._tm_show_tip(event, r)
+        self.lbl_st.config(text="  " + self._tm_tip(r), foreground=self.app.OK)
+
+    def _tm_leave(self, _event):
+        self._tm_hover_key = None
+        self.canvas.delete("tip")
+        self._tm_overlay()
+
+    def _tm_select_key(self, key, sync_table=True):
+        self._tm_sel_key = key
+        self._tm_overlay()
+        if not sync_table or key is None:
+            return
+        target = None                              # acompanha a seleção na tabela:
+        for iid, it in self._rdata.items():        # a linha exata, senão a pasta que a contém
+            if it["path"] == key[0] and ("files" if it.get("is_self") else "dir") == key[1]:
+                target = iid
+                break
+            if target is None and not it.get("is_self") and is_under(path_key(key[0]), path_key(it["path"])):
+                target = iid
+        if target is not None:
+            if self.tree.selection() != (target,):
+                self.tree.selection_set(target)
+            self.tree.see(target)
+
+    def _on_tree_select(self, _event=None):
+        sel = self.tree.selection()
+        if not sel or sel[0] not in self._rdata:
+            return
+        it = self._rdata[sel[0]]
+        key = (it["path"], "files" if it.get("is_self") else "dir")
+        if key != self._tm_sel_key:
+            self._tm_select_key(key, sync_table=False)
+
+    def _tm_click(self, event):
+        self.canvas.focus_set()
+        r = self._tm_hit(event.x, event.y)
+        if r is None:
+            return
+        self._tm_select_key(self._tm_key(r))
+        self.lbl_st.config(text="  " + self._tm_tip(r) + "  ·  " + r["node"]["path"], foreground=self.app.OK)
+
+    def _tm_double(self, event):
+        r = self._tm_hit(event.x, event.y)
+        # blocos "[arquivos desta pasta]" e "[outros]" pertencem à pasta do caminho: entra nela
+        if r is not None and path_key(r["node"]["path"]) != path_key(self._cur_dir):
+            self.load_dir(r["node"]["path"])
+
+    def _tm_zoom(self, event, direction):
+        """Roda para cima entra na pasta sob o mouse; para baixo sobe um nível."""
+        now = time.time()
+        if now - self._tm_last_zoom < 0.3:
+            return
+        self._tm_last_zoom = now
+        if direction < 0:
+            self.go_up()
+            return
+        r = self._tm_hit(event.x, event.y)
+        if r is not None and path_key(r["node"]["path"]) != path_key(self._cur_dir):
+            self.load_dir(r["node"]["path"])
+
     def _populate(self, norm, items, rt, origin):
+        self._sp = rt
         try:
             tw = self.tree._w
             self.tree.tk.eval("catch {%s delete [%s children {}]}" % (tw, tw))
@@ -3699,6 +4310,8 @@ class SpaceDialog(object):
             text="  Total em %s: %s em %d arquivo(s)  |  %d item(ns)"
             % (os.path.basename(norm) or norm, fsize(rt["total_size"]),
                rt["total_files"], len(self._rows)))
+        if self._tm_on:
+            self._tm_redraw()
         if not self._scanning:
             self.lbl_st.config(
                 text="  Espaço calculado (%s): %s em %d arquivo(s)."
@@ -3737,6 +4350,7 @@ class SpaceDialog(object):
                     self.b_scan.config(state="normal")
                     self.b_stop.config(state="disabled")
                     self.prog.stop()
+                    self.prog.pack_forget()
                     self._populate(norm, items, rt, "mapeamento pausado" if stopped else "índice atualizado")
                     self.lbl_st.config(
                         text="  Mapeamento %s: %s em %d arquivo(s)."
@@ -3814,20 +4428,25 @@ class SpaceDialog(object):
             defaultextension=".xlsx",
             filetypes=[("Planilha Excel", "*.xlsx"),
                        ("CSV (Excel, LibreOffice, QGIS)", "*.csv"),
-                       ("Texto formatado", "*.txt")])
+                       ("Texto formatado", "*.txt"),
+                       ("Treemap (página HTML)", "*.html")])
         if not dest:
             return
         dest = os.path.normpath(dest)
-        if os.path.splitext(dest)[1].lower() not in EXPORT_FORMATS:
+        if os.path.splitext(dest)[1].lower() not in tuple(EXPORT_FORMATS) + (".html",):
             dest += ".xlsx"
         self.b_export.config(state="disabled")
         self.lbl_st.config(text="  Exportando %d linha(s) para %s..." % (len(rows), dest),
                            foreground=self.app.WARN)
         done_q = queue.Queue()
+        sp_now, cur_now = self._sp, self._cur_dir
 
         def work():
             try:
-                n = export_space_results(rows, dest)
+                if dest.lower().endswith(".html"):
+                    n = export_treemap_html(sp_now, dest, cur_now, primary=self._tm_metric)
+                else:
+                    n = export_space_results(rows, dest)
                 done_q.put((n, None))
             except Exception as e:
                 done_q.put((0, str(e)))
@@ -3877,117 +4496,504 @@ def _hide_own_console():
     except Exception:
         pass
 
+# ===========================================================================
+# Linha de comando (modo sem janela), pensada para pessoas, scripts e IAs
+# ===========================================================================
+CLI_ACTIONS = ("indexar", "espaco", "buscar", "maiores", "extensoes", "status",
+               "treemap", "manifesto")
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_NOT_FOUND, EXIT_INTERRUPTED = 0, 1, 2, 3, 130
+
+_CLI_EPILOG = """\
+exemplos:
+  reperio --espaco D:\\ --top 20                     espaço por pasta (mapeia se o índice não cobrir)
+  reperio --espaco D:\\ --json --profundidade 2      o mesmo em JSON, 2 níveis de subpastas
+  reperio --indexar C:\\ --ignorar OneDrive          (re)indexa C:\\ sem entrar no OneDrive
+  reperio --maiores 30 --em C:\\Users\\eu --so-indice  30 maiores arquivos, só consultando o índice
+  reperio --extensoes 15 --em D:\\                   espaço por extensão
+  reperio --buscar "*.zip" --em D:\\ --tamanho "> 1 GB" --json
+  reperio --espaco D:\\ --treemap mapa.html          gera o treemap (HTML autônomo)
+  reperio --status                                  o que o índice já conhece
+  reperio --manifesto                               descrição legível por máquina (para IAs)
+
+códigos de saída: 0 ok · 1 erro · 2 uso incorreto · 3 pasta inexistente/sem dados no índice · 130 interrompido
+Sem nenhuma ação, abre a janela. Documentação: docs/CLI.md e docs/IA.md."""
+
+def _build_parser():
+    p = argparse.ArgumentParser(
+        prog="reperio", add_help=False, allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="%s %s — busca, índice, espaço por pasta e treemap de arquivos." % (APP_NAME, __version__),
+        epilog=_CLI_EPILOG)
+    a = p.add_argument_group("ações (sem nenhuma, abre a janela)")
+    a.add_argument("--indexar", metavar="PASTA", help="lê PASTA no disco/servidor e grava no índice")
+    a.add_argument("--espaco", metavar="PASTA", help="espaço ocupado por subpasta (usa o índice; mapeia se faltar)")
+    a.add_argument("--buscar", metavar="PADRÃO", help="arquivos por nome ('contém' ou curingas * ?) no índice")
+    a.add_argument("--maiores", metavar="N", type=int, help="os N maiores arquivos")
+    a.add_argument("--extensoes", metavar="N", type=int, nargs="?", const=20,
+                   help="espaço por extensão (as N maiores, padrão 20)")
+    a.add_argument("--treemap", metavar="ARQ.html", help="grava o treemap em HTML autônomo")
+    a.add_argument("--status", action="store_true", help="resumo do índice (pastas, arquivos, raízes, tamanho)")
+    a.add_argument("--manifesto", action="store_true",
+                   help="imprime em JSON tudo que a CLI faz (argumentos, saídas, códigos) — para IAs")
+    f = p.add_argument_group("alvo e filtros")
+    f.add_argument("--em", metavar="PASTA", help="pasta-alvo de --buscar/--maiores/--extensoes/--treemap "
+                                                 "(padrão: a de --espaco ou --indexar)")
+    f.add_argument("--ignorar", metavar="LISTA", default="",
+                   help="pastas a ignorar: nomes, curingas ou subcaminhos ('_backup, node_modules, temp_*')")
+    f.add_argument("--ext", metavar="LISTA", default="", help="--buscar: extensões ('shp tif')")
+    f.add_argument("--tamanho", metavar="FILTRO", default="",
+                   help="--buscar: filtro de tamanho ('> 100 MB', '10MB..500MB')")
+    f.add_argument("--maiusculas", action="store_true", help="--buscar: diferencia maiúsculas de minúsculas")
+    f.add_argument("--limite", metavar="N", type=int, default=100, help="--buscar: máximo de resultados (padrão 100)")
+    f.add_argument("--ordenar", choices=("tamanho", "data", "nome"), default="tamanho",
+                   help="--buscar: ordem dos resultados (padrão tamanho)")
+    o = p.add_argument_group("saída")
+    o.add_argument("--json", action="store_true",
+                   help="resultado em UM objeto JSON no stdout (ASCII); mensagens vão para o stderr")
+    o.add_argument("--top", metavar="N", type=int, default=30, help="--espaco: itens por nível (padrão 30)")
+    o.add_argument("--profundidade", metavar="N", type=int, default=None,
+                   help="níveis de subpastas: --espaco (padrão 1) e --treemap (padrão 3)")
+    o.add_argument("--treemap-por", dest="treemap_por", choices=TREEMAP_METRICS, default="tamanho",
+                   help="métrica do treemap exibida primeiro no HTML (ambas ficam no arquivo)")
+    o.add_argument("--exportar", metavar="ARQ", help="--espaco: grava a tabela em .xlsx, .csv ou .txt")
+    o.add_argument("-q", "--silencioso", action="store_true", help="sem mensagens de progresso")
+    c = p.add_argument_group("índice e execução")
+    c.add_argument("--indice", "--index", dest="indice", metavar="ARQ", default=INDEX_PATH,
+                   help="arquivo SQLite do índice (padrão: %s)" % INDEX_PATH.replace("%", "%%"))
+    c.add_argument("--no-index", "--sem-indice", dest="no_index", action="store_true",
+                   help="não usa índice (tudo em memória; só --espaco e --treemap)")
+    c.add_argument("--atualizar", action="store_true",
+                   help="relê no disco as pastas alteradas mesmo que o índice já cubra a pasta-alvo")
+    c.add_argument("--so-indice", dest="so_indice", action="store_true",
+                   help="nunca varre o disco: sem dados no índice, termina com código 3")
+    h = p.add_argument_group("ajuda")
+    h.add_argument("-h", "--help", "--ajuda", action="help", help="mostra esta ajuda")
+    h.add_argument("--version", action="version", version="%s %s" % (APP_NAME, __version__),
+                   help="mostra a versão")
+    return p
+
+def _safe_stdio():
+    """Console em codificação antiga (cp1252/cp850) não pode derrubar a CLI ao imprimir
+    um nome de arquivo com caracteres fora dela: troca por '?' em vez de lançar exceção."""
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
 def _parse_cli(argv):
-    """Interpreta argumentos de linha de comando sem impedir os flags existentes."""
-    opts = {
-        "index_path": INDEX_PATH,
-        "no_index": "--no-index" in argv,
-        "index_dir": None,
-        "space_dir": None,
-        "export": None,
-        "excludes": (),
-        "refresh": "--atualizar" in argv,
-        "top": 30,
-    }
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a in ("--indice", "--index") and i + 1 < len(argv):
-            opts["index_path"] = os.path.normpath(argv[i + 1])
-            i += 2
-        elif a == "--indexar" and i + 1 < len(argv):
-            opts["index_dir"] = os.path.normpath(argv[i + 1])
-            i += 2
-        elif a == "--espaco" and i + 1 < len(argv):
-            opts["space_dir"] = os.path.normpath(argv[i + 1])
-            i += 2
-        elif a == "--exportar" and i + 1 < len(argv):
-            opts["export"] = os.path.normpath(argv[i + 1])
-            i += 2
-        elif a == "--ignorar" and i + 1 < len(argv):
-            opts["excludes"] = parse_excludes(argv[i + 1])
-            i += 2
-        elif a == "--top" and i + 1 < len(argv):
-            try:
-                opts["top"] = max(1, int(argv[i + 1]))
-            except ValueError:
-                pass
-            i += 2
-        else:
-            i += 1
+    """Interpreta a linha de comando. Argumento desconhecido = erro de uso (código 2),
+    nunca abre a janela por engano."""
+    parser = _build_parser()
+    ns = parser.parse_args(argv)
+    opts = dict(vars(ns))
+    opts["index_path"] = os.path.normpath(ns.indice)
+    opts["excludes"] = tuple(parse_excludes(ns.ignorar))
+    opts["refresh"] = ns.atualizar
+    opts["actions"] = [k for k in CLI_ACTIONS if getattr(ns, k) not in (None, False)]
+    root = ns.em or ns.espaco or ns.indexar
+    opts["root"] = os.path.normpath(root) if root else None
+    opts["index_dir"] = os.path.normpath(ns.indexar) if ns.indexar else None
+    opts["space_dir"] = os.path.normpath(ns.espaco) if ns.espaco else None
+    opts["export"] = os.path.normpath(ns.exportar) if ns.exportar else None
+    opts["_parser"] = parser
+    acts = opts["actions"]
+    if not acts:
+        extra = [k for k in ("em", "ext", "tamanho", "json", "profundidade", "exportar",
+                             "so_indice", "atualizar", "maiusculas") if getattr(ns, k) not in (None, False, "")]
+        if extra:
+            parser.error("nenhuma ação informada para: --%s (veja --ajuda)" % ", --".join(extra))
+        return opts
+    needs_root = {"buscar", "maiores", "extensoes", "treemap"} & set(acts)
+    if needs_root and not opts["root"]:
+        parser.error("--%s precisa de uma pasta: use --em PASTA (ou --espaco/--indexar)" % sorted(needs_root)[0])
+    if opts["no_index"] and ({"buscar", "maiores", "extensoes", "status"} & set(acts)):
+        parser.error("--no-index só vale para --espaco e --treemap")
+    if opts["no_index"] and ns.so_indice:
+        parser.error("--no-index e --so-indice são contraditórios")
+    if ns.exportar and "espaco" not in acts:
+        parser.error("--exportar vale para --espaco")
+    for name in ("top", "limite"):
+        if getattr(ns, name) < 1:
+            parser.error("--%s precisa ser maior que zero" % name)
+    if ns.maiores is not None and ns.maiores < 1:
+        parser.error("--maiores precisa ser maior que zero")
+    if ns.profundidade is not None and ns.profundidade < 1:
+        parser.error("--profundidade precisa ser maior que zero")
     return opts
 
-def _run_cli(opts):
-    """Modo de linha de comando (sem abrir janela): `--indexar` e/ou `--espaco`."""
-    rotate_log()
-    index = None
-    if not opts["no_index"]:
-        index = Index(opts["index_path"])
+def _peak_ram_mb():
+    """Pico de memória do processo em MB (None se o sistema não informar)."""
     try:
-        scan_target = opts["index_dir"]
-        if not scan_target and opts["space_dir"]:
-            if index is None:
-                scan_target = opts["space_dir"]
-            elif opts["refresh"]:
-                scan_target = opts["space_dir"]
-            else:
-                sp = index.folder_space(opts["space_dir"], exclude_dirs=opts["excludes"])
-                if not sp or (sp["scanned_dirs"] == 0 and sp["total_files"] == 0):
-                    scan_target = opts["space_dir"]
-        mem_rows = []
-        if scan_target:
-            t0 = time.time()
-            q = queue.Queue(maxsize=4000)
-            stop = threading.Event()
-            st = SearchThread(scan_target, "*", set(), False, q, stop,
-                              fast_mode=True, index=index, refresh=True,
-                              exclude_dirs=opts["excludes"], want_meta=True)
-            st.start()
-            count = 0
-            while True:
-                item = q.get()
-                if item is SearchThread.DONE:
+        if IS_WIN:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+            k32 = ctypes.WinDLL("kernel32")
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi = ctypes.WinDLL("psapi")
+            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(pmc)
+            if psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
+                return round(pmc.PeakWorkingSetSize / 1048576.0, 1)
+            return None
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(peak / (1048576.0 if sys.platform == "darwin" else 1024.0), 1)
+    except Exception:
+        return None
+
+def _iso(t):
+    if t is None or t < 0:
+        return None
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t))
+    except (ValueError, OSError, OverflowError):
+        return None
+
+def space_item_to_dict(it):
+    """Item de `folder_space_children` no formato do JSON da CLI."""
+    return {
+        "nome": it["name"], "caminho": it["path"],
+        "tipo": "arquivos_diretos" if it.get("is_self") else "pasta",
+        "bytes": it["total_size"], "tamanho": fsize(it["total_size"]),
+        "arquivos": it["total_files"], "subpastas": it["subdirs"],
+        "bytes_diretos": it["direct_size"], "arquivos_diretos": it["direct_files"],
+        "pct_pai": round(it["pct_parent"], 2), "pct_raiz": round(it["pct_root"], 2),
+    }
+
+def space_to_dict(space_info, folder, depth=1, top=30):
+    """Espaço por pasta como lista de dicts, com "filhos" até `depth` níveis."""
+    out = []
+    for it in folder_space_children(space_info, folder)[:top]:
+        d = space_item_to_dict(it)
+        if depth > 1 and not it.get("is_self") and it["subdirs"]:
+            d["filhos"] = space_to_dict(space_info, it["path"], depth - 1, top)
+        out.append(d)
+    return out
+
+class _CliOut(object):
+    """Separa o que é resultado (stdout) do que é mensagem (stdout no modo texto,
+    stderr no modo --json, para o stdout ser sempre um JSON válido)."""
+    def __init__(self, as_json, quiet):
+        self.as_json, self.quiet = as_json, quiet
+        self.data = {}
+
+    def info(self, text=""):
+        if self.quiet:
+            return
+        print(text, file=sys.stderr if self.as_json else sys.stdout)
+
+    def text(self, text=""):
+        if not self.as_json:
+            print(text)
+
+    def fail(self, code, msg):
+        if self.as_json:
+            print(json.dumps({"reperio": __version__, "ok": False, "codigo": code, "erro": msg},
+                             ensure_ascii=True, indent=2))
+        else:
+            sys.stderr.write("Erro: %s\n" % msg)
+        return code
+
+    def emit(self):
+        if self.as_json:
+            print(json.dumps(self.data, ensure_ascii=True, indent=2))
+
+def _cli_scan(target, index, excludes, out):
+    """Lê `target` alimentando o índice (ou a memória, sem índice). Devolve estatísticas."""
+    t0 = time.time()
+    q = queue.Queue(maxsize=4000)
+    stop = threading.Event()
+    st = SearchThread(target, "*", set(), False, q, stop, fast_mode=True, index=index,
+                      refresh=True, exclude_dirs=excludes, want_meta=True)
+    st.start()
+    count, mem_rows, errors = 0, ([] if index is None else None), []
+    interrupted, last = False, time.time()
+    try:
+        while True:
+            try:
+                item = q.get(timeout=1.0)
+            except queue.Empty:
+                item = None
+                if not st.is_alive():
                     break
+            if item is SearchThread.DONE:
+                break
+            if item is not None:
                 tag = item[0]
                 if tag == "__ERR__":
+                    errors.append(item[1])
                     sys.stderr.write("Erro: %s\n" % item[1])
                 elif tag not in ("__STATUS__", "__REMOVE__", "__REMOVE_DIR__"):
                     count += 1
-                    if index is None:
+                    if mem_rows is not None:
                         path, _name, _ext, sz, dp, mt = item
                         mem_rows.append({"path": path, "dir": dp, "size": sz, "mtime": mt})
-            if index is not None:
-                index.flush()
-            el = time.time() - t0
-            print("Indexado: %s (%d arquivos em %.1fs) -> %s" % (
-                scan_target, count, el, opts["index_path"] if index else "memória"))
-        if opts["space_dir"]:
-            target = opts["space_dir"]
-            if index is not None:
-                sp = index.folder_space(target, exclude_dirs=opts["excludes"])
+            if time.time() - last >= 10:
+                last = time.time()
+                out.info("  ... %s pastas lidas, %s arquivos, %s conferidas, %ds" % (
+                    fmt_n(st.dirs), fmt_n(count), fmt_n(st.checked), time.time() - t0))
+    except KeyboardInterrupt:
+        interrupted = True
+        stop.set()
+        end = time.time() + 10
+        while time.time() < end:          # deixa a busca encerrar e gravar o índice
+            try:
+                if q.get(timeout=0.5) is SearchThread.DONE:
+                    break
+            except queue.Empty:
+                if not st.is_alive():
+                    break
+    if index is not None:
+        index.flush()
+    el = time.time() - t0
+    return {"alvo": target, "tempo_s": round(el, 3), "arquivos": count,
+            "pastas_lidas": st.dirs, "pastas_conferidas": st.checked, "pastas_relidas": st.changed,
+            "arquivos_por_s": round(count / el, 1) if el > 0 else None,
+            "falhas": [{"pasta": p, "erro": str(e)} for p, e in st.failed[:200]],
+            "n_falhas": len(st.failed), "problematicas_puladas": len(st.skipped_problems),
+            "erros": errors, "interrompido": interrupted,
+            "indice": index.path if index is not None else None,
+            "resumo": st.summary}, mem_rows
+
+def _cli_search(index, opts, out):
+    """`--buscar`: filtra o índice e devolve (resumo, resultados)."""
+    root = opts["root"]
+    lo, hi = parse_size_filter(opts["tamanho"])
+    matcher = make_matcher(opts["buscar"], parse_exts(opts["ext"]), opts["maiusculas"])
+    limit, order = opts["limite"], opts["ordenar"]
+    seq, total, total_bytes, heap, every = [0], [0], [0], [], []
+
+    def emit(item):
+        path, name, _ext, sz, _dp, mt = item
+        total[0] += 1
+        total_bytes[0] += max(0, sz)
+        row = {"caminho": path, "nome": name, "bytes": sz, "tamanho": fsize(sz), "modificado": _iso(mt)}
+        if order == "nome":
+            every.append(row)
+            return
+        seq[0] += 1
+        key = sz if order == "tamanho" else mt
+        if len(heap) < limit:
+            heapq.heappush(heap, (key, seq[0], row))
+        elif key > heap[0][0]:
+            heapq.heapreplace(heap, (key, seq[0], row))
+    info = index.query(root, matcher, emit, threading.Event(),
+                       size_matcher=make_size_matcher(lo, hi),
+                       dir_excluder=make_dir_excluder(opts["excludes"], root))
+    if order == "nome":
+        rows = sorted(every, key=lambda r: (r["nome"].lower(), r["caminho"].lower()))[:limit]
+    else:
+        rows = [r for _k, _s, r in sorted(heap, key=lambda x: (x[0], x[1]), reverse=True)]
+    return {"padrao": opts["buscar"], "pasta": root, "total_encontrado": total[0],
+            "bytes_total": total_bytes[0], "exibidos": len(rows), "ordenado_por": order,
+            "pastas_no_indice": info["dirs"], "pastas_pendentes": len(info["pending"]),
+            "resultados": rows}
+
+def _cli_manifest(parser):
+    """Descrição legível por máquina da CLI (para IAs descobrirem o que ela faz)."""
+    args = []
+    for a in parser._actions:
+        if not a.option_strings or isinstance(a, (argparse._HelpAction, argparse._VersionAction)):
+            continue
+        d = a.default
+        args.append({"flags": a.option_strings, "ajuda": a.help,
+                     "tipo": ("flag" if a.nargs == 0 else getattr(a.type, "__name__", "texto")),
+                     "padrao": d if isinstance(d, (str, int, float, bool, type(None))) else None,
+                     "opcoes": list(a.choices) if a.choices else None})
+    return {
+        "programa": APP_NAME, "versao": __version__, "url": APP_URL,
+        "descricao": "Indexa pastas locais e de rede em SQLite e responde: onde está o espaço, "
+                     "quais são os maiores arquivos, quais arquivos casam com um padrão, e gera treemap.",
+        "convencoes": [
+            "Use --json: o stdout é sempre UM objeto JSON (ASCII); mensagens de progresso vão para o stderr.",
+            "O índice acumula leituras: a 2ª consulta à mesma pasta sai em segundos sem tocar o disco.",
+            "Use --so-indice para garantir que nenhuma varredura longa seja disparada.",
+            "Os caminhos no JSON são os reais do sistema; 'bytes' é exato, 'tamanho' é só legível.",
+            "Tamanho de arquivos do OneDrive/nuvem só-online é o lógico, não o ocupado no disco: "
+            "use --ignorar OneDrive para medir o disco local.",
+        ],
+        "argumentos": args,
+        "saida_json": {
+            "comum": ["reperio", "ok", "pasta", "varredura", "desempenho"],
+            "espaco": "lista 'itens' (nome, caminho, tipo, bytes, tamanho, arquivos, subpastas, "
+                      "pct_pai, pct_raiz, filhos) + total_bytes, total_arquivos, pastas_lidas, "
+                      "pastas_pendentes, completo",
+            "maiores": "lista de {caminho, bytes, tamanho, modificado}",
+            "extensoes": "lista de {extensao, arquivos, bytes, tamanho, pct}",
+            "busca": "{padrao, total_encontrado, bytes_total, exibidos, resultados[]}",
+            "treemap": "{arquivo, por, profundidade}",
+            "status": "{indice, pastas, pastas_pendentes, arquivos, bytes, raizes[], ...}",
+            "erro": "{ok:false, codigo, erro}",
+        },
+        "codigos_de_saida": {"0": "ok", "1": "erro", "2": "uso incorreto dos argumentos",
+                             "3": "pasta inexistente ou sem dados no índice (com --so-indice)",
+                             "130": "interrompido (Ctrl+C); o que foi lido fica no índice"},
+        "exemplos": [
+            "reperio --espaco D:\\ --json --profundidade 2 --top 15",
+            "reperio --maiores 25 --em C:\\Users\\eu --json --so-indice",
+            "reperio --buscar \"*.zip\" --em D:\\ --tamanho \"> 500 MB\" --json",
+            "reperio --espaco D:\\ --treemap D:\\mapa.html --json",
+        ],
+    }
+
+def _run_cli(opts):
+    """Executa as ações da CLI. Devolve o código de saída."""
+    rotate_log()
+    t_start = time.time()
+    acts = opts["actions"]
+    out = _CliOut(opts["json"], opts["silencioso"])
+    if "manifesto" in acts:
+        print(json.dumps(_cli_manifest(opts["_parser"]), ensure_ascii=True, indent=2))
+        return EXIT_OK
+    data = out.data
+    data.update({"reperio": __version__, "ok": True})
+    root, excl = opts["root"], opts["excludes"]
+    index = None
+    try:
+        if not opts["no_index"]:
+            index = Index(opts["index_path"])
+    except Exception as e:
+        return out.fail(EXIT_ERROR, "não foi possível abrir o índice %s: %s" % (opts["index_path"], e))
+    try:
+        if "status" in acts:
+            s = index.stats()
+            data["indice"] = {
+                "arquivo": s["path"], "tamanho_arquivo_bytes": s["disk_bytes"], "pastas": s["dirs"],
+                "pastas_pendentes": s["pending_dirs"], "arquivos": s["files"], "bytes": s["bytes"],
+                "tamanho": fsize(s["bytes"]), "problematicas": s["problems"], "raizes": s["roots"],
+                "leitura_mais_antiga": _iso(s["oldest"]), "leitura_mais_recente": _iso(s["newest"])}
+            out.text("Índice: %s (%s no disco)" % (s["path"], fsize(s["disk_bytes"])))
+            out.text("Pastas lidas: %s · pendentes: %s · problemáticas: %s" % (
+                fmt_n(s["dirs"]), fmt_n(s["pending_dirs"]), fmt_n(s["problems"])))
+            out.text("Arquivos: %s · %s" % (fmt_n(s["files"]), fsize(s["bytes"])))
+            out.text("Leitura: %s a %s" % (fdate(s["oldest"]), fdate(s["newest"])))
+            for r in s["roots"]:
+                out.text("  raiz: %s" % r)
+            if len(acts) == 1:
+                out.emit()
+                return EXIT_OK
+        sp, mem_rows, scan = None, None, None
+        scan_target = opts["index_dir"]
+        if not scan_target and root:
+            if index is None or opts["refresh"]:
+                scan_target = root
             else:
-                sp = summarize_rows_space(mem_rows, target, exclude_dirs=opts["excludes"])
-            items = folder_space_children(sp, target)
-            print("\nEspaço por pasta em: %s" % target)
-            print("Total: %s em %d arquivo(s)\n" % (fsize(sp["total_size"]), sp["total_files"]))
+                sp = index.folder_space(root, exclude_dirs=excl)
+                if not sp or (sp["scanned_dirs"] == 0 and sp["total_files"] == 0):
+                    scan_target = root
+        if scan_target:
+            if opts["so_indice"]:
+                return out.fail(EXIT_NOT_FOUND, "sem dados no índice para %s (--so-indice impede "
+                                "a varredura; rode antes --indexar)" % scan_target)
+            if not os.path.isdir(fs_path(scan_target)):
+                return out.fail(EXIT_NOT_FOUND, "pasta não encontrada: %s" % scan_target)
+            scan, mem_rows = _cli_scan(scan_target, index, excl, out)
+            for e in scan["erros"]:
+                data.setdefault("avisos", []).append(e)
+            out.text("Indexado: %s (%d arquivos em %.1fs) -> %s" % (
+                scan_target, scan["arquivos"], scan["tempo_s"],
+                opts["index_path"] if index else "memória"))
+            if scan["n_falhas"]:
+                out.info("Atenção: %d pasta(s) não puderam ser lidas (veja 'varredura.falhas' no --json)"
+                         % scan["n_falhas"])
+            data["varredura"] = scan
+            if scan["interrompido"]:
+                data["ok"] = False
+                data["erro"] = "interrompido pelo usuário; o que foi lido ficou no índice"
+                out.emit()
+                return EXIT_INTERRUPTED
+        else:
+            data["varredura"] = {"executada": False, "motivo": "índice já cobre a pasta"}
+        if root:
+            data["pasta"] = root
+            if sp is None or scan is not None:
+                sp = (index.folder_space(root, exclude_dirs=excl) if index is not None
+                      else summarize_rows_space(mem_rows or [], root, exclude_dirs=excl))
+
+        if "espaco" in acts:
+            target = opts["space_dir"]
+            if path_key(target) != path_key(root) and index is not None:   # --em aponta para outra pasta
+                sp_e = index.folder_space(target, exclude_dirs=excl)
+            else:
+                sp_e = sp
+            items = folder_space_children(sp_e, target)
+            depth = opts["profundidade"] or 1
+            data["espaco"] = {
+                "pasta": target, "total_bytes": sp_e["total_size"], "total": fsize(sp_e["total_size"]),
+                "total_arquivos": sp_e["total_files"], "pastas_lidas": sp_e["scanned_dirs"],
+                "pastas_pendentes": sp_e["pending_dirs"], "completo": sp_e["pending_dirs"] == 0,
+                "itens": space_to_dict(sp_e, target, depth, opts["top"])}
+            out.text("\nEspaço por pasta em: %s" % target)
+            out.text("Total: %s em %d arquivo(s)\n" % (fsize(sp_e["total_size"]), sp_e["total_files"]))
             for it in items[:opts["top"]]:
-                print("%12s  %5.1f%%  %8d arq.  %s" % (
+                out.text("%12s  %5.1f%%  %8d arq.  %s" % (
                     fsize(it["total_size"]), it["pct"], it["total_files"], it["path"]))
             if opts["export"]:
                 export_space_results(items, opts["export"])
-                print("\nExportado para: %s" % opts["export"])
+                data["exportado"] = opts["export"]
+                out.text("\nExportado para: %s" % opts["export"])
+        if "maiores" in acts:
+            rows = index.largest_files(root, opts["maiores"], exclude_dirs=excl)
+            data["maiores"] = [{"caminho": p, "bytes": s, "tamanho": fsize(s), "modificado": _iso(m)}
+                               for p, s, m in rows]
+            out.text("\nMaiores arquivos em: %s\n" % root)
+            for p, s, _m in rows:
+                out.text("%12s  %s" % (fsize(s), p))
+        if "extensoes" in acts:
+            n_ext = opts["extensoes"] or 20
+            rows = index.extension_summary(root, n_ext, exclude_dirs=excl)
+            tot = sp["total_size"] or 1
+            data["extensoes"] = [{"extensao": e, "arquivos": n, "bytes": s, "tamanho": fsize(s),
+                                  "pct": round(s * 100.0 / tot, 2)} for e, n, s in rows]
+            out.text("\nEspaço por extensão em: %s\n" % root)
+            for e, n, s in rows:
+                out.text("%12s  %5.1f%%  %9d arq.  %s" % (fsize(s), s * 100.0 / tot, n, e))
+        if "buscar" in acts:
+            try:
+                res = _cli_search(index, opts, out)
+            except ValueError as e:
+                return out.fail(EXIT_USAGE, str(e))
+            data["busca"] = res
+            out.text("\n%s encontrado(s) para %r em %s (%s); mostrando %d por %s\n" % (
+                fmt_n(res["total_encontrado"]), res["padrao"], root,
+                fsize(res["bytes_total"]), res["exibidos"], res["ordenado_por"]))
+            for r in res["resultados"]:
+                out.text("%12s  %s" % (r["tamanho"], r["caminho"]))
+        if "treemap" in acts:
+            dest = os.path.normpath(opts["treemap"])
+            depth = opts["profundidade"] or 3
+            export_treemap_html(sp, dest, root, depth=depth, primary=opts["treemap_por"])
+            data["treemap"] = {"arquivo": dest, "por": opts["treemap_por"], "profundidade": depth}
+            out.text("\nTreemap gravado em: %s" % dest)
+        data["desempenho"] = {"tempo_total_s": round(time.time() - t_start, 3),
+                              "pico_ram_mb": _peak_ram_mb()}
+        out.emit()
+        return EXIT_OK
+    except KeyboardInterrupt:
+        return out.fail(EXIT_INTERRUPTED, "interrompido")
+    except Exception as e:
+        dlog("[ERRO] CLI\n%s" % traceback.format_exc())
+        return out.fail(EXIT_ERROR, "%s: %s" % (type(e).__name__, e))
     finally:
         if index is not None:
             index.close()
-    return 0
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if "--version" in argv:
-        print("%s %s" % (APP_NAME, __version__))
-        return 0
+    _safe_stdio()
     opts = _parse_cli(argv)
-    if opts["index_dir"] or opts["space_dir"]:
+    if opts["actions"]:
         return _run_cli(opts)
     if tk is None:
         sys.stderr.write("Erro: tkinter não está disponível neste Python.\n"
