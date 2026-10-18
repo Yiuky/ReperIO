@@ -6,20 +6,21 @@
 
 <p align="center">
   <strong>Encontre, indexe, exporte e copie arquivos em servidores de arquivos grandes e lentos, sem instalar nada</strong><br>
-  <em>Busca por nome e extensão · Índice local · Excel / CSV / TXT · Cópia paralela · SMB, DFS e unidades mapeadas · Windows e Linux</em>
+  <em>Busca por nome e extensão · Treemap interativo · Índice local · CLI com JSON para IAs · Excel / CSV / TXT · Cópia paralela · SMB, DFS e unidades mapeadas · Windows e Linux</em>
 </p>
 
 <p align="center">
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.8+"></a>
   <a href="#-requisitos"><img src="https://img.shields.io/badge/Plataforma-Windows%20%7C%20Linux-0078D6.svg" alt="Windows | Linux"></a>
   <a href="#-por-que-sem-dependências"><img src="https://img.shields.io/badge/Depend%C3%AAncias-nenhuma-success.svg" alt="Sem dependências"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.7.0-28A745.svg" alt="Versão v2.7.0"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Versão-v2.7.1-28A745.svg" alt="Versão v2.7.1"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License MIT"></a>
   <a href="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml"><img src="https://github.com/Yiuky/ReperIO/actions/workflows/tests.yml/badge.svg" alt="Testes"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Yiuky/ReperIO/releases/latest"><strong>⬇️ Baixar</strong></a> •
+  <a href="#️-veja-em-ação"><strong>🖼️ Veja em ação</strong></a> •
   <a href="#-uso-rápido"><strong>📖 Como usar</strong></a> •
   <a href="CHANGELOG.md"><strong>📋 Novidades</strong></a> •
   <a href="https://github.com/Yiuky/ReperIO/issues/new/choose"><strong>🐞 Relatar problema</strong></a> •
@@ -30,22 +31,101 @@
 ---
 
 <p align="center">
-  <img src="docs/images/janela_principal.png" alt="Janela principal do ReperIO" width="94%" />
+  <img src="docs/images/espaco_treemap_tamanho.png" alt="Treemap interativo do ReperIO por tamanho, com a tabela de espaço por pasta" width="94%" />
 </p>
 
 ## 📌 O que faz
 
-O ReperIO varre pastas locais e **servidores de arquivos de rede** (SMB/CIFS, DFS, unidades mapeadas)
-atrás de arquivos por **nome, extensão e tamanho**: centenas de milhares de pastas, pastas com dezenas de
-milhares de arquivos e servidores que às vezes param de responder. Os achados formam o seu
-**repertório**: você pode filtrar, inspecionar o **espaço ocupado por pasta**, ordenar, **exportar para
-Excel, CSV ou TXT** e **copiar em lote**.
+O ReperIO responde a três perguntas sobre pastas gigantes, locais ou em **servidor de arquivos de rede**
+(SMB/CIFS, DFS, unidades mapeadas):
 
-Foi criado para bancos de imagens e dados geográficos (GIS), mas serve a qualquer acervo grande de
-arquivos em rede ou disco local.
+1. **Onde está o arquivo?** Busca por nome, extensão e tamanho em centenas de milhares de pastas,
+   mesmo com servidores que às vezes param de responder.
+2. **Onde foi parar o espaço?** Tamanho de cada pasta e subpasta, com **treemap interativo** (estilo
+   SpaceSniffer) por tamanho ou por quantidade de arquivos.
+3. **Como automatizar?** Linha de comando com **saída JSON estável**, pronta para scripts, tarefas
+   agendadas e **IAs**.
+
+Os achados formam o seu **repertório**: filtre, ordene, **exporte para Excel, CSV ou TXT** e **copie
+em lote**. Foi criado para bancos de imagens e dados geográficos (GIS), mas serve a qualquer acervo grande.
 
 > Projeto **pessoal e independente** de Joberth Firmino Gambati: não é um produto oficial de nenhuma
 > instituição nem fala em nome dela.
+
+## 🖼️ Veja em ação
+
+Todas as imagens abaixo usam um acervo **fictício** (≈ 129 GB, 42 mil arquivos), gerado por
+[`tools/screenshots.py`](tools/screenshots.py).
+
+### Busca e filtros
+
+<p align="center">
+  <img src="docs/images/janela_principal.png" alt="Janela principal do ReperIO com 105 arquivos .tif encontrados, 3 selecionados" width="94%" />
+</p>
+
+Digite o padrão, filtre por extensão, tamanho e pastas ignoradas e clique em **Iniciar busca**. Os
+resultados aparecem enquanto a busca acontece; o contador mostra o volume encontrado e o selecionado.
+
+### Espaço por pasta com treemap interativo
+
+<p align="center">
+  <img src="docs/images/espaco_treemap_tamanho.png" alt="Treemap por tamanho: VIDEOS_DRONE ocupa metade do acervo" width="94%" />
+</p>
+
+**Espaço e treemap...** abre um painel com o **treemap acima da tabela, na mesma janela**. A área de cada
+bloco é proporcional ao **tamanho**: aqui, `VIDEOS_DRONE` ocupa metade do acervo.
+
+<p align="center">
+  <img src="docs/images/espaco_treemap_quantidade.png" alt="Treemap por quantidade de arquivos: TILES_WEB domina" width="94%" />
+</p>
+
+Em **Blocos por: Quantidade** o mesmo acervo muda de cara: `TILES_WEB` tem 42 mil arquivinhos e pesa
+menos de 1 GB. É o tipo de pasta que deixa a busca, a cópia e o backup lentos sem ocupar espaço.
+
+| Ação | Resultado |
+|---|---|
+| **Passar o mouse** | Destaca o bloco e mostra caminho, tamanho, arquivos e participação |
+| **Clicar** | Seleciona o bloco; a linha da tabela acompanha (e vice-versa) |
+| **Duplo clique** ou **roda do mouse para cima** | Entra na pasta sob o mouse |
+| **Roda para baixo**, **botão direito** ou **Backspace** | Sobe um nível |
+| **Blocos por: Tamanho / Quantidade** | Troca a métrica |
+| **Ocultar treemap** | Esconde o painel e deixa só a tabela |
+| **Exportar... → Treemap (página HTML)** | Grava uma página autônoma, sem internet |
+
+A página HTML (também gerada por `--treemap mapa.html`) funciona em qualquer navegador, tem tema claro e
+escuro e alterna entre tamanho e quantidade:
+
+<p align="center">
+  <img src="docs/images/treemap_html.png" alt="Treemap exportado em HTML, tema escuro, com a tabela dos maiores itens" width="80%" />
+</p>
+
+### Fluido e responsivo
+
+A interface nunca trava (leitura de disco e rede ficam fora da thread da janela), o treemap se
+redesenha ao redimensionar, e **nenhum botão some ao reduzir a janela**: o tamanho mínimo é calculado
+a partir do que os controles realmente pedem (fonte e escala do sistema), e um teste automático
+confere isso em vários tamanhos.
+
+<p align="center">
+  <img src="docs/images/janela_principal_minima.png" alt="Janela principal no tamanho mínimo, com todos os botões visíveis" width="46%" />
+  &nbsp;
+  <img src="docs/images/espaco_tamanho_minimo.png" alt="Janela de espaço por pasta no tamanho mínimo, com todos os botões visíveis" width="46%" />
+</p>
+<p align="center"><em>As duas janelas no menor tamanho permitido: tudo continua visível e clicável.</em></p>
+
+### Linha de comando e IAs
+
+<p align="center">
+  <img src="docs/images/cli_texto.png" alt="Saída em texto da CLI: espaço por pasta, por extensão e maiores arquivos" width="94%" />
+</p>
+
+Com `--json`, a CLI entrega **um único objeto JSON** no stdout (mensagens vão para o stderr), com
+campos estáveis, códigos de saída fixos e `--manifesto` para uma IA descobrir tudo sozinha:
+
+<p align="center">
+  <img src="docs/images/cli_json.png" alt="Trecho simplificado da saída JSON de --espaco com subpastas" width="64%" />
+</p>
+<p align="center"><em>Trecho simplificado: a saída real traz mais campos (veja <a href="docs/CLI.md#formato-do-json">docs/CLI.md</a>).</em></p>
 
 ## 💡 Por que "ReperIO"
 
@@ -59,10 +139,13 @@ faz: **acha** os arquivos e compõe o **repertório** do que foi encontrado. O *
 | | |
 |---|---|
 | 🔎 **Busca e filtros** | "Contém" (`IMAGENS_`) ou curingas (`*.shp`, `LC08_*_B4.TIF`), extensões, **tamanho** (`> 100 MB`, `10MB..500MB`) e **exclusão de pastas** (`_backup, node_modules`) |
-| 📊 **Espaço por pasta** | Mostra quanto espaço cada pasta e subpasta ocupa (com `%`, quantidade de arquivos, navegação com duplo clique, pausa/retomada e exportação) |
-| ⚡ **Rápido em pastas enormes** | Leitura em paralelo e em lotes grandes por ida ao servidor (~3× mais rápido em pastas com 65 mil arquivos) |
-| 🗂️ **Índice local e compartilhável** | A 2ª busca na mesma pasta sai em segundos, com qualquer padrão e até com o servidor fora do ar; suporta indexação agendada via CLI (`--indexar`) |
+| 🗺️ **Treemap interativo** | Blocos proporcionais ao **tamanho** ou à **quantidade de arquivos**, com dica ao passar o mouse, seleção sincronizada com a tabela e zoom pela roda do mouse; exporta para HTML |
+| 📊 **Espaço por pasta** | Quanto cada pasta e subpasta ocupa (com `%`, quantidade de arquivos, navegação, pausa/retomada do mapeamento e exportação) |
+| 🤖 **CLI para IAs e scripts** | `--json` estável, `--so-indice` (nunca varre o disco), `--manifesto`, códigos de saída fixos; ações `--espaco`, `--maiores`, `--extensoes`, `--buscar`, `--treemap`, `--status` |
+| ⚡ **Rápido em pastas enormes** | Leitura em paralelo e em lotes grandes por ida ao servidor (~3× mais rápido em pastas com 65 mil arquivos); 869 mil arquivos indexados em ~85 s ([benchmark](docs/BENCHMARK.md)) |
+| 🗂️ **Índice local e compartilhável** | A 2ª busca na mesma pasta sai em segundos, com qualquer padrão e até com o servidor fora do ar; indexação agendada via CLI (`--indexar`) |
 | 🛡️ **Não trava** | Uma pasta que o servidor não consegue abrir não segura a busca: o ReperIO troca de conexão e trata a pasta à parte |
+| 📐 **Responsivo** | Nenhum botão some ao redimensionar; tamanho mínimo calculado pelo conteúdo e coberto por teste automático |
 | 📤 **Exportar** | Resultados e relatórios de espaço para **Excel (.xlsx)**, **CSV** ou **TXT**, sem precisar do Excel para gerar |
 | 📋 **Cópia paralela** | 4 cópias simultâneas, em blocos de 1 MB, com cancelamento a qualquer momento e nomes repetidos renomeados |
 | 💻 **Portátil** | Executável único para Windows e Linux; sem instalação, sem administrador, sem `pip` |
@@ -74,6 +157,9 @@ faz: **acha** os arquivos e compõe o **repertório** do que foi encontrado. O *
 | **Windows 10/11 (64 bits)** | `ReperIO.exe` | nenhum |
 | **Linux x64** | `./ReperIO` | glibc 2.35+ (Ubuntu 22.04+, Debian 12+, Fedora 36+…) |
 | **macOS e outros** | [código-fonte](#-rodar-a-partir-do-código-fonte) | Python 3.8+ com tkinter |
+
+A CLI (`--json`, `--espaco`, `--buscar`…) roda só com **Python 3.8+**, sem tkinter, inclusive em servidores
+sem interface gráfica.
 
 ## ⚡ Instalação
 
@@ -106,8 +192,7 @@ Linux); caso contrário, abre o executável. Nos dois casos, nada é baixado nem
    novo troca o padrão sem perder o que já foi lido.
 7. Na lista de resultados:
    - **Duplo clique** em um arquivo abre a pasta dele no sistema já destacando o arquivo;
-   - **Espaço por pasta...** abre o painel interativo com o consumo de espaço de cada subpasta (com
-     duplo clique para entrar nas subpastas, botão *Mapear pasta agora* com pausa/retomada e exportação);
+   - **Espaço e treemap...** abre o painel de [espaço por pasta com treemap](#espaço-por-pasta-com-treemap-interativo);
    - **Exportar...** salva a lista em Excel, CSV ou TXT; ou
    - informe o **Destino** e clique **Copiar selecionados**. *Plana* coloca tudo numa pasta;
      *Manter estrutura original* reproduz as subpastas.
@@ -149,27 +234,30 @@ padrão ou filtro de tamanho. Na busca seguinte:
 - **Apagar índice** limpa tudo; desmarque **Usar** para ignorá-lo numa busca.
 - Fica em `%LOCALAPPDATA%\reperio\` (Windows) ou `~/.local/state/reperio/` (Linux), ou no caminho
   informado com `--indice <arquivo.sqlite>` (útil para compartilhar um índice na rede).
-- **Modo sem janela (CLI)** para tarefas agendadas, auditoria rápida de disco e **uso por IAs**:
-  ```bash
-  python reperio.py --indexar "\\servidor\dados" --indice "\\servidor\dados\_reperio.sqlite"
-  python reperio.py --espaco "C:\Users\voce" --top 25 --exportar espaco.xlsx
-  python reperio.py --maiores 20 --em D:\ --so-indice          # 20 maiores arquivos, sem tocar o disco
-  python reperio.py --buscar "*.iso" --em D:\ --tamanho "> 1 GB" --json
-  python reperio.py --espaco D:\ --treemap mapa.html            # mapa visual em HTML
-  ```
-  `--json` entrega **um objeto JSON** estável no stdout, `--so-indice` garante respostas instantâneas,
-  `--manifesto` descreve a CLI em JSON e os códigos de saída são fixos. Referência em
-  [docs/CLI.md](docs/CLI.md); guia para agentes em [docs/IA.md](docs/IA.md); números medidos em
-  [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
-### 🗺️ Treemap interativo
+### Modo sem janela (CLI), para scripts e IAs
 
-Em **Espaço por pasta...**, um painel de **treemap fica acima da tabela, na mesma janela** (estilo
-SpaceSniffer): a **área dos blocos é proporcional ao tamanho ou à quantidade de arquivos** (botão
-**Por: tamanho / quantidade**; **Ocultar treemap** esconde o painel). Passe o mouse para ver os detalhes,
-clique para selecionar (a tabela acompanha), **roda do mouse** ou duplo clique para entrar numa pasta,
-botão direito para subir. **Exportar... → Treemap
-(página HTML)** ou `--treemap mapa.html` gera uma página autônoma (sem internet, tema claro/escuro).
+```bash
+python reperio.py --indexar "\\servidor\dados" --indice "\\servidor\dados\_reperio.sqlite"
+python reperio.py --espaco "C:\Users\voce" --top 25 --exportar espaco.xlsx
+python reperio.py --maiores 20 --em D:\ --so-indice          # 20 maiores arquivos, sem tocar o disco
+python reperio.py --extensoes 10 --em D:\ --so-indice        # espaço por extensão
+python reperio.py --buscar "*.iso" --em D:\ --tamanho "> 1 GB" --json
+python reperio.py --espaco D:\ --treemap mapa.html           # mapa visual em HTML
+python reperio.py --manifesto                                # a CLI descrevendo a si mesma, em JSON
+```
+
+| Ideia | Como |
+|---|---|
+| Saída para máquinas | `--json`: um objeto JSON em ASCII no stdout; progresso e avisos no stderr |
+| Nunca varrer sem querer | `--so-indice`: sem dados no índice, termina com código **3** |
+| Descobrir sozinha | `--manifesto`: argumentos, campos de saída, códigos e exemplos em JSON |
+| Códigos de saída | `0` ok · `1` erro · `2` uso incorreto · `3` pasta/índice ausente · `130` Ctrl+C |
+| Erro de digitação | Argumento desconhecido é erro de uso: a janela **não** abre por engano |
+
+O ReperIO **só lê**: nenhuma ação da CLI apaga, move ou altera arquivos. Referência completa em
+[docs/CLI.md](docs/CLI.md); guia e receitas para agentes em [docs/IA.md](docs/IA.md); números medidos
+em discos reais em [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## 🛡️ Confiável em redes lentas e instáveis
 
@@ -314,7 +402,7 @@ python -m unittest discover -s tests -v          # Windows
 xvfb-run -a python3 -m unittest discover -s tests -v   # Linux sem tela
 ```
 
-95 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
+96 testes, incluindo a simulação dos cenários vistos em servidor real: pasta que trava a conexão,
 vítimas refeitas na hora, cascata entre conexões, pastas grandes que não são travamento, nomes
 inválidos de servidores Samba antigos, filtros de tamanho/exclusão, análise de espaço por pasta, treemap, CLI/JSON e
 exportação com datas corrompidas. O GitHub Actions roda a suíte em Windows e Linux, com Python 3.8 e
@@ -346,8 +434,11 @@ do [CITATION.cff](CITATION.cff)) ou assim:
 **ReperIO** (from Latin *reperire*, "to find, to discover", the root of *repertory*) is a portable,
 dependency-free desktop tool for **Windows and Linux** that searches local folders and **network file
 servers** (SMB/CIFS, DFS, mapped drives) for files by name, extension and size, analyzes **disk/folder
-space usage**, builds a local **SQLite index** for instant repeated searches, **exports** results to
-Excel (.xlsx), CSV or TXT, and **copies** files in parallel.
+space usage** with an interactive **treemap** (by size or by file count), builds a local **SQLite index**
+for instant repeated searches, **exports** results to Excel (.xlsx), CSV or TXT, and **copies** files in
+parallel. A headless **CLI with stable JSON output** (`--json`, `--so-indice`, `--manifesto`, fixed exit
+codes) makes it ready for scripts, scheduled tasks and AI agents; the UI never hides a button when the
+window is resized.
 
 It was built for very large, slow and unreliable file servers. On Windows, a single folder that the
 server cannot open stalls the whole SMB connection for minutes; ReperIO opens **several independent

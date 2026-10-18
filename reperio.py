@@ -36,7 +36,7 @@ import threading
 import time
 import traceback
 
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 APP_NAME = "ReperIO"
 APP_TAGLINE = "busca, índice, exportação e cópia de arquivos em servidores"
 APP_URL = "https://github.com/Yiuky/ReperIO"
@@ -3108,6 +3108,18 @@ class App(object):
         self._filter(tp)
         self._results(mp)
         self._copy_panel(bp)
+        # Tamanho mínimo = o que os painéis pedem + um pedaço útil da lista de resultados
+        self.root.update_idletasks()
+        need_w = max(tp.winfo_reqwidth(), mp.winfo_reqwidth(), bp.winfo_reqwidth())
+        need_h = (tp.winfo_reqheight() + bp.winfo_reqheight() + 150
+                  + sum(w.winfo_reqheight() for w in self.root.winfo_children()
+                        if w.winfo_manager() == "pack" and w is not pane))
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.root.minsize(min(max(900, need_w), sw - 40), min(max(560, need_h), sh - 90))
+        cw, ch = self.root.winfo_width(), self.root.winfo_height()
+        mw, mh = self.root.minsize()
+        if cw < mw or ch < mh:
+            self.root.geometry("%dx%d" % (max(cw, mw), max(ch, mh)))
 
     def _hdr(self):
         h = ttk.Frame(self.root, style="Panel.TFrame")
@@ -3828,8 +3840,8 @@ class SpaceDialog(object):
         self.app = app
         self.win = tk.Toplevel(app.root)
         self.win.title("Espaço por pasta — %s" % APP_NAME)
-        self.win.geometry("1260x760")
-        self.win.minsize(900, 480)
+        self.win.geometry("1200x780")
+        self.win.minsize(720, 480)
         self.win.configure(bg=app.BG)
         self._closed = False
         self._q = queue.Queue()
@@ -3851,6 +3863,11 @@ class SpaceDialog(object):
         self._tm_after = None
         self._tm_last_zoom = 0.0
         self._build(initial_dir)
+        self.win.update_idletasks()
+        fixed = [w for w in self.win.winfo_children() if w.winfo_manager() == "pack" and w is not self.pw]
+        fit_minsize(self.win, 720, 480,
+                    need_w=max(w.winfo_reqwidth() for w in fixed) + 8,
+                    need_h=sum(w.winfo_reqheight() for w in fixed) + 260)   # + treemap e tabela
         self.win.protocol("WM_DELETE_WINDOW", self._close)
         self._poll()
         if initial_dir:
@@ -3893,19 +3910,23 @@ class SpaceDialog(object):
         self.b_export = ttk.Button(bf, text="Exportar...", style="Primary.TButton",
                                    command=self._export)
         self.b_export.pack(side="right", padx=(4, 0))
-        self.f_metric = ttk.Frame(bf, style="Panel.TFrame")
-        self.f_metric.pack(side="right", padx=(4, 8))
+
+        # 2ª linha: visualização (treemap) à esquerda, ações sobre a pasta à direita
+        bf2 = ttk.Frame(top, style="Panel.TFrame")
+        bf2.grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 8), sticky="ew")
+        self.b_tm = ttk.Button(bf2, text="Ocultar treemap", style="Secondary.TButton",
+                               command=self._toggle_treemap)
+        self.b_tm.pack(side="left", padx=(0, 4))
+        self.f_metric = ttk.Frame(bf2, style="Panel.TFrame")
+        self.f_metric.pack(side="left", padx=(8, 4))
         ttk.Label(self.f_metric, text="Blocos por:", style="Panel.TLabel").pack(side="left", padx=(0, 4))
         self.v_metric = tk.StringVar(value="tamanho")
         for txt, val in (("Tamanho", "tamanho"), ("Quantidade", "quantidade")):
             ttk.Radiobutton(self.f_metric, text=txt, value=val, variable=self.v_metric,
                             style="Dark.TRadiobutton", command=self._set_metric).pack(side="left", padx=2)
-        self.b_tm = ttk.Button(bf, text="Ocultar treemap", style="Secondary.TButton",
-                               command=self._toggle_treemap)
-        self.b_tm.pack(side="right", padx=4)
-        ttk.Button(bf, text="Abrir no sistema", style="Secondary.TButton",
-                   command=self._open_selected).pack(side="right", padx=4)
-        ttk.Button(bf, text="Usar como Pasta Raiz", style="Secondary.TButton",
+        ttk.Button(bf2, text="Abrir no sistema", style="Secondary.TButton",
+                   command=self._open_selected).pack(side="right", padx=(4, 0))
+        ttk.Button(bf2, text="Usar como Pasta Raiz", style="Secondary.TButton",
                    command=self._use_as_root).pack(side="right", padx=4)
 
         ttk.Separator(self.win, orient="horizontal").pack(fill="x")
@@ -3916,7 +3937,7 @@ class SpaceDialog(object):
             sf, text="  Informe uma pasta para ver o espaço ocupado por cada subpasta.",
             style="Counter.TLabel")
         self.lbl_sum.pack(side="left", padx=8, pady=5)
-        ttk.Label(sf, text="Cor = pasta de 1º nível · cinza = arquivos soltos · roda do mouse entra/sobe · botão direito sobe  ",
+        ttk.Label(sf, text="Roda do mouse: entra/sobe · botão direito: sobe  ",
                   style="Sub.TLabel").pack(side="right", padx=8, pady=5)
 
         self.pw = ttk.PanedWindow(self.win, orient="vertical")
@@ -4100,7 +4121,7 @@ class SpaceDialog(object):
         if self._tm_on:
             self.pw.insert(0, self._tm_frame, weight=3)
             self.b_tm.config(text="Ocultar treemap")
-            self.f_metric.pack(side="right", padx=(4, 8))
+            self.f_metric.pack(side="left", padx=(8, 4))
             self._tm_schedule()
         else:
             self.pw.forget(self._tm_frame)
@@ -4478,6 +4499,24 @@ class SpaceDialog(object):
             pass
 
 # ===========================================================================
+def fit_minsize(win, min_w, min_h, need_w=None, need_h=None):
+    """
+    Define o tamanho mínimo da janela a partir do que os controles realmente pedem
+    (fontes e DPI mudam de máquina para máquina), para que nenhum botão fique
+    cortado ou escondido ao reduzir a janela. Nunca passa da tela. Devolve (w, h).
+    `need_w`/`need_h`: o que os controles fixos pedem (padrão: o pedido da janela toda).
+    """
+    win.update_idletasks()
+    w = max(min_w, win.winfo_reqwidth() if need_w is None else need_w)
+    h = max(min_h, win.winfo_reqheight() if need_h is None else need_h)
+    w = min(w, max(min_w, win.winfo_screenwidth() - 40))
+    h = min(h, max(min_h, win.winfo_screenheight() - 90))
+    win.minsize(w, h)
+    cw, ch = win.winfo_width(), win.winfo_height()
+    if cw < w or ch < h:      # janela já aberta menor que o mínimo: cresce
+        win.geometry("%dx%d" % (max(cw, w), max(ch, h)))
+    return w, h
+
 def _hide_own_console():
     """Esconde a janela de console quando ela foi criada SÓ para este processo
     (duplo clique no .py com python.exe). Se o script foi chamado de um
